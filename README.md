@@ -42,29 +42,7 @@ Deep dives:
   - At least 2 subnets in different AZs (3 recommended)
   - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs — LMI needs outbound HTTPS to send telemetry
 - **AWS Service Quota headroom** — the shipped defaults request ~1,200 vCPU of EC2 capacity, well above default account quotas. See [`Service-Quotas`](docs/deployment-topology.md#service-quotas) for the exact quotas to request. `scripts/deploy.sh` also prints the requirements in its post-deploy summary.
-
-### Required IAM Permissions
-
-Your deployment role needs these in addition to standard SAM permissions:
-
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "lambda:CreateCapacityProvider",
-    "lambda:DeleteCapacityProvider",
-    "lambda:GetCapacityProvider",
-    "lambda:ListCapacityProviders",
-    "lambda:UpdateCapacityProvider",
-    "lambda:PutFunctionScalingConfig",
-    "iam:PassRole",
-    "iam:CreateServiceLinkedRole"
-  ],
-  "Resource": "*"
-}
-```
-
-> **Note:** `iam:CreateServiceLinkedRole` is only needed on first use of LMI in the account, or if the service-linked role was deleted.
+- **IAM Permissions** required for performing actions with SAM and LMI
 
 ## Project Structure
 
@@ -269,21 +247,9 @@ Assuming the fleet is pre-warmed for a 7-minute window (5-minute ramp and 2-minu
 
 ## Security
 
-This is a **reference architecture**, not a production-ready product. It intentionally omits controls that depend on operator-specific choices (identity provider for end users, WAF rules, monitoring stack, isolation account boundaries) so those decisions stay yours.
+This is a **reference architecture**, not a production-ready product. It intentionally omits controls that depend on operator-specific choices (identity provider for end users, WAF rules, monitoring stack, isolation account boundaries) so those decisions stay yours. Please validate your existing controls apply to the below areas:
 
-Baseline controls shipped in this revision:
-
-- **AWS_IAM auth** on both API Gateways. Every request to `TicketingApi` or `SimulationApi` must be SigV4-signed; the ticketing handlers derive `user_id` from the authenticated principal (`requestContext.identity.userArn`), not from the request body.
-- **Server-side clamps** on `target_tps`, `ramp_duration_seconds`, `sustain_duration_seconds` in the orchestrator (`MAX_TARGET_TPS=40000`, `MAX_RAMP_SECONDS=60`, `MAX_SUSTAIN_SECONDS=300` by default; all CloudFormation parameters).
-- **Lowered `CapacityProviderMaxVCpus` default** from 6000 to 2000 (≈125 c7i.4xlarge, ~1.7× the baseline fleet) so a successful auth bypass still cannot grow the LMI fleet beyond the validated envelope.
-- **Optional `AWS::Budgets::Budget` alarm** (set `BudgetNotificationEmail` at deploy time to enable) with 80% / 100% actual + 100% forecast notifications on the stack's cost allocation tag.
-- **CORS restricted** to the configured `AllowedOrigin` parameter (default `http://localhost:8000` for the local `demo-ui`); handler-level wildcard CORS headers removed.
-- **SigV4-signing proxy** in `demo-ui/serve.py` so the browser never holds an AWS credential. `serve.py` binds `127.0.0.1` only.
-- **Thread-safe Redis client lazy-init** in `queue-position/handler.py` (double-checked locking) for LMI's multi-concurrent execution model.
-
-Still your responsibility before production:
-
-- **End-user authentication** layered on top of AWS_IAM (Cognito user pool, OAuth partner IDP, or signed URLs) — the sample's `user_id` today is an IAM principal ARN, which is fine for operator-driven load tests but not for public ticketing. The single point to change is `_authenticated_user_id()` in each handler.
+- **End-user authentication** layered on top of AWS_IAM (Cognito user pool, OAuth partner IDP, or signed URLs).
 - **AWS WAF** with rate-based rules and Bot Control on both stages.
 - **Admission-control layer** (waiting room / queue) in front of `/inventory/lock` to blunt hold-squatting bots.
 - **ElastiCache Redis AUTH token or IAM auth** — the sample uses VPC + security-group isolation only.
