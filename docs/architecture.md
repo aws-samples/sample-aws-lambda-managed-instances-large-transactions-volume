@@ -36,7 +36,7 @@ The Simulation App on the left drives load into the Ticketing App on the right t
 | Total HTTP requests | 4,804,200 |
 | Bookings landed (durable in DynamoDB) | 1,750,886 |
 | End-to-end p50 / p99 latency | 44 ms / 121 ms |
-| Lambda errors / Lambda throttles / DDB throttles | 0 / 0 / 0 |
+| Lambda errors / Lambda throttles / DynamoDB throttles | 0 / 0 / 0 |
 | Instance type | c7i.4xlarge (16 vCPU, hosts 4 EEs each) |
 | LMI fleet at baseline Min EEs | 300 EEs → 75 instances |
 | DynamoDB shard count | 500 |
