@@ -41,7 +41,7 @@ Deep dives:
 - **An existing Amazon VPC** with:
   - At least 2 subnets in different AZs (3 recommended)
   - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs — LMI needs outbound HTTPS to send telemetry
-- **AWS Service Quota headroom** — the shipped defaults request ~1,200 vCPU of EC2 capacity, well above default account quotas. See [`docs/deployment-topology.md#service-quotas`](docs/deployment-topology.md#service-quotas) for the exact quotas to request. `scripts/deploy.sh` also prints the requirements in its post-deploy summary.
+- **AWS Service Quota headroom** — the shipped defaults request ~1,200 vCPU of EC2 capacity, well above default account quotas. See [`Service-Quotas`](docs/deployment-topology.md#service-quotas) for the exact quotas to request. `scripts/deploy.sh` also prints the requirements in its post-deploy summary.
 
 ### Required IAM Permissions
 
@@ -132,7 +132,7 @@ For a fresh manual deploy (without `deploy.sh`), edit the `parameter_overrides` 
 
 ### Optional: enable the AWS Budgets alarm
 
-The ticketing stack ships an optional `AWS::Budgets::Budget` resource that fires email alerts at 80 % and 100 % of a configured monthly spend ceiling. It is created only when `BudgetNotificationEmail` is set at deploy time. To enable it via `deploy.sh`, export the email address before running:
+The ticketing stack ships an optional `AWS::Budgets::Budget` resource that fires email alerts at 80% and 100% of a configured monthly spend ceiling. It is created only when `BudgetNotificationEmail` is set at deploy time. To enable it via `deploy.sh`, export the email address before running:
 
 ```bash
 BUDGET_EMAIL=ops@example.com \
@@ -267,7 +267,7 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
-The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands around **$24 K/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
+The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands at around **$24 K/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
 
 ## Security
 
