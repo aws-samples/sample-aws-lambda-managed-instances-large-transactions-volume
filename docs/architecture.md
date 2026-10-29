@@ -25,7 +25,6 @@ The request path enters through API Gateway and traverses three sequential Lambd
 
 The Simulation App on the left drives load into the Ticketing App on the right through the three-tier fan-out (Orchestrator → Coordinator × N → Worker × M). Every worker fires HTTP flows against the Ticketing API while recording per-wave metrics.
 
-**Diagram source:** [`images/architecture.drawio`](./images/architecture.drawio). Edit in [drawio.com](https://app.diagrams.net) or via the VS Code drawio extension.
 
 ### Key numbers (from the 40 K TPS × 120 s headline run)
 
@@ -98,9 +97,9 @@ The three ticketing handlers share one LMI capacity provider. Each handler has i
 
 ### 4.2 Data layer: sharded DynamoDB
 
-**Inventory table** — one row per seat, with a synthetic sharded partition key
+**Inventory table** — one row per seat, with a synthetic sharded partition key.
 
-**Pre-provisioned capacity.** Both tables use `WarmThroughput` to pre-provision physical partitions before the burst:
+**Pre-provisioned capacity.** — Both tables use `WarmThroughput` to pre-provision physical partitions before the burst:
 
 - inventory table: 25,000 RCU / 40,000 WCU (higher write budget because inventory sees two writes per booking — the hold in Phase 2 and the transition in Phase 3)
 - bookings table: 25,000 RCU / 25,000 WCU
