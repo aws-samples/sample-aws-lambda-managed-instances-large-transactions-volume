@@ -98,14 +98,7 @@ The three ticketing handlers share one LMI capacity provider. Each handler has i
 
 ### 4.2 Data layer: sharded DynamoDB
 
-**Inventory table** — one row per seat, with a synthetic sharded partition key:
-
-```
-pk = f"{event_id}#{crc32(seat_id) % 500:03d}"
-seat_id  = <seat identifier>
-```
-
-At 500 shards and 40 K TPS, each shard receives ~80 WCU/sec on average — an order of magnitude below the ~1,000 WCU/sec per-physical-partition ceiling even under load skew. Both `inventory-lock` and `booking-confirm` derive the same `pk` from `(event_id, seat_id)` deterministically, so they target the same physical row without coordination.
+**Inventory table** — one row per seat, with a synthetic sharded partition key
 
 **Pre-provisioned capacity.** Both tables use `WarmThroughput` to pre-provision physical partitions before the burst:
 
