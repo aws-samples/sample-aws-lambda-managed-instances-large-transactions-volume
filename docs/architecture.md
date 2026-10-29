@@ -48,9 +48,9 @@ The Simulation App on the left drives load into the Ticketing App on the right t
 
 The reference implementation follows a **queue plus hold-and-confirm** booking pattern that is standard in inventory-constrained e-commerce. Each successful booking calls three endpoints in order:
 
-- **`POST /queue/position`** — `queue-position` handler; Redis `INCR queue:{event_id}` for admission control. Measured p99: **~5 ms**.
-- **`POST /inventory/lock`** — `inventory-lock` handler; conditional `UpdateItem` transitions the seat `AVAILABLE` → `HELD` with a 180 s TTL. Measured p99: **~16 ms**.
-- **`POST /booking/confirm`** — `booking-confirm` handler; atomic `TransactWriteItems` transitions the seat `HELD` → `CONFIRMED` **and** writes a durable booking record. Either both writes succeed or neither does — no over-selling, no orphaned records. Measured p99: **~40 ms**.
+- **`POST /queue/position`** — `queue-position` handler; Redis `INCR queue:{event_id}` for admission control. 
+- **`POST /inventory/lock`** — `inventory-lock` handler; conditional `UpdateItem` transitions the seat `AVAILABLE` → `HELD` with a 180 s TTL. 
+- **`POST /booking/confirm`** — `booking-confirm` handler; atomic `TransactWriteItems` transitions the seat `HELD` → `CONFIRMED` **and** writes a durable booking record. Either both writes succeed or neither does — no over-selling, no orphaned records. 
 
 **Handler state and thread safety.** All *business* state (seat status, queue counters, booking records) lives in Redis and DynamoDB — the handlers hold no request-specific state across invocations. Each handler does cache a small amount of connection-level state at module scope: boto3 clients, boto3 resources, a `boto3.dynamodb.ServiceResource.Table()` reference, and (in `queue-position`) the ElastiCache Redis client. The specific thread-safety contract the handlers rely on:
 
