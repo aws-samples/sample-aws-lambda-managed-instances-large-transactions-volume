@@ -260,6 +260,8 @@ This is a **reference architecture**, not a production-ready product. It intenti
 
 [![Contributors](https://contrib.rocks/image?repo=aws-samples/sample-aws-lambda-managed-instances-large-transactions-volume&max=2000)](https://github.com/aws-samples/sample-aws-lambda-managed-instances-large-transactions-volume/graphs/contributors)
 
+[![Contributors](https://contrib.rocks/image?repo=aws-samples/sample-lambda-managed-instances-analytics&max=2000)](https://github.com/aws-samples/sample-lambda-managed-instances-analytics/graphs/contributors)
+
 ## Support
 
 - [AWS Lambda Managed Instances documentation](https://docs.aws.amazon.com/lambda/latest/dg/lambda-managed-instances.html)
