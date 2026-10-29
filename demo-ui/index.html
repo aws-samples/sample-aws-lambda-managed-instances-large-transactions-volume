@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LMI Ticketing Demo</title>
+
+  <!-- Tailwind Play runtime (self-hosted, no build step, no external CDN).
+       This is the same in-browser JIT build formerly loaded from
+       cdn.tailwindcss.com, vendored locally under vendor/ so the demo has no
+       runtime dependency on a third-party CDN. To update, re-download the
+       pinned version (see demo-ui/README.md). -->
+  <script src="vendor/tailwindcss-play-3.4.5.min.js"></script>
+
+  <!-- Local config (loaded before app.js so window.CONFIG is ready) -->
+  <script src="config.js"></script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body class="bg-slate-50 text-slate-800 font-sans antialiased" x-data="demoApp()" x-init="init()">
+
+  <!-- ============================ HEADER ============================ -->
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-3xl mx-auto px-6 py-4 flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-white font-bold text-lg">&lambda;</div>
+      <div>
+        <h1 class="font-bold text-slate-900">LMI Ticketing Demo</h1>
+        <p class="text-xs text-slate-500">AWS Lambda Managed Instances &middot; burst simulation</p>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================ BURST REQUEST ============================ -->
+  <main class="max-w-3xl mx-auto px-6 py-6">
+    <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+      <div class="mb-4">
+        <h2 class="text-lg font-bold text-slate-900">Simulate a burst</h2>
+        <p class="text-sm text-slate-500">Send load to the LMI-backed ticketing API.</p>
+      </div>
+
+      <div class="p-4 bg-slate-50 rounded-lg">
+        <div class="text-xs font-medium text-slate-600 mb-2">Target load</div>
+        <div class="grid grid-cols-4 gap-2 mb-3">
+          <template x-for="opt in targetLoads" :key="opt.value">
+            <button
+              @click="selectPresetTarget(opt.value)"
+              :class="{
+                'bg-orange-500 text-white border-orange-600 shadow': !customTargetActive && selectedTarget === opt.value,
+                'bg-white text-slate-700 border-slate-300 hover:border-slate-400': customTargetActive || selectedTarget !== opt.value
+              }"
+              class="py-2 rounded border font-bold text-sm transition"
+            >
+              <div x-text="opt.label"></div>
+              <div class="text-[10px] font-normal opacity-75" x-text="opt.desc"></div>
+            </button>
+          </template>
+        </div>
+
+        <!-- Custom TPS input -->
+        <div class="flex items-center gap-2 mb-3">
+          <label class="text-xs text-slate-600 shrink-0">or custom:</label>
+          <input
+            type="number"
+            x-model.number="customTarget"
+            @input="onCustomTargetInput()"
+            min="1"
+            max="200000"
+            step="100"
+            placeholder="e.g. 25000"
+            class="flex-1 px-2 py-1 text-sm rounded border border-slate-300 focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400 font-mono"
+          />
+          <span class="text-xs text-slate-500 shrink-0">req/s</span>
+        </div>
+
+        <!-- Burst duration + ramp -->
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          <div>
+            <label class="text-xs text-slate-600 block mb-1">Duration</label>
+            <div class="flex items-center gap-1">
+              <input
+                type="number"
+                x-model.number="burstDuration"
+                min="5"
+                max="600"
+                class="flex-1 px-2 py-1 text-sm rounded border border-slate-300 focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400 font-mono"
+              />
+              <span class="text-xs text-slate-500">s</span>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-slate-600 block mb-1">Ramp</label>
+            <div class="flex items-center gap-1">
+              <input
+                type="number"
+                x-model.number="burstRamp"
+                min="0"
+                max="60"
+                class="flex-1 px-2 py-1 text-sm rounded border border-slate-300 focus:border-orange-400 focus:outline-none focus:ring-1 focus:ring-orange-400 font-mono"
+              />
+              <span class="text-xs text-slate-500">s</span>
+            </div>
+          </div>
+        </div>
+
+        <button
+          @click="startBurst()"
+          :disabled="burstRunning || effectiveTarget < 1"
+          class="w-full py-2 px-4 rounded-lg text-white font-medium text-sm transition"
+          :class="(burstRunning || effectiveTarget < 1) ? 'bg-orange-300 cursor-not-allowed' : 'bg-orange-500 hover:bg-orange-600'"
+        >
+          <span x-show="!burstRunning">&#128293; Start burst (<span x-text="effectiveTarget.toLocaleString()"></span> req/s for <span x-text="burstDuration"></span>s)</span>
+          <span x-show="burstRunning">Burst in progress&hellip; <span x-text="burstElapsed"></span>s / <span x-text="burstDuration"></span>s</span>
+        </button>
+
+        <!-- Small status line under the button — no charts, no tiles -->
+        <div class="mt-3 text-xs text-slate-500 font-mono min-h-[16px]" x-text="statusLine"></div>
+      </div>
+
+      <!-- Identifiers for this burst — shown as soon as the run_id is known -->
+      <div
+        x-show="burstRunId"
+        x-transition
+        class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200"
+      >
+        <div class="text-xs font-medium text-slate-700 mb-2">Identifiers for this burst</div>
+        <p class="text-[11px] text-slate-500 mb-3">Use these to query DynamoDB directly. Click any value to copy.</p>
+
+        <!-- run_id — partition key in ticketing-simulation-metrics -->
+        <div class="mb-3">
+          <div class="text-[11px] text-slate-500 mb-1">
+            <span class="font-medium">run_id</span> · partition key in
+            <span class="font-mono">ticketing-simulation-metrics</span>
+          </div>
+          <button
+            @click="copyToClipboard(burstRunId, 'run_id')"
+            class="w-full flex items-center justify-between gap-2 px-3 py-2 rounded bg-white border border-slate-300 hover:border-orange-400 hover:bg-orange-50 transition group"
+            :title="'Click to copy: ' + burstRunId"
+          >
+            <span class="font-mono text-xs text-slate-900 truncate" x-text="burstRunId"></span>
+            <span class="text-[10px] text-slate-400 group-hover:text-orange-600 shrink-0">
+              <span x-show="copiedField !== 'run_id'">copy</span>
+              <span x-show="copiedField === 'run_id'" class="text-green-600 font-medium">copied &#10003;</span>
+            </span>
+          </button>
+        </div>
+
+        <!-- event_id — part of pk in ticketing inventory + bookings tables -->
+        <div class="mb-3">
+          <div class="text-[11px] text-slate-500 mb-1">
+            <span class="font-medium">event_id</span> · in
+            <span class="font-mono">inventory-sharded</span> and
+            <span class="font-mono">bookings</span>
+          </div>
+          <button
+            @click="copyToClipboard(burstEventId, 'event_id')"
+            class="w-full flex items-center justify-between gap-2 px-3 py-2 rounded bg-white border border-slate-300 hover:border-orange-400 hover:bg-orange-50 transition group"
+            :title="'Click to copy: ' + burstEventId"
+          >
+            <span class="font-mono text-xs text-slate-900 truncate" x-text="burstEventId"></span>
+            <span class="text-[10px] text-slate-400 group-hover:text-orange-600 shrink-0">
+              <span x-show="copiedField !== 'event_id'">copy</span>
+              <span x-show="copiedField === 'event_id'" class="text-green-600 font-medium">copied &#10003;</span>
+            </span>
+          </button>
+        </div>
+
+        <!-- Single "View results" button — appears after the burst completes.
+             One call to /dashboard fetches ground truth + EE stats + Lambda
+             metrics in parallel; UI renders totals + per-handler health table. -->
+        <div x-show="!burstRunning" class="mb-3">
+          <button
+            x-show="results === null && !resultsLoading && !resultsError"
+            @click="fetchResults()"
+            class="w-full py-2 px-4 rounded-lg text-white font-medium text-sm transition bg-purple-700 hover:bg-purple-800"
+            title="Queries API Gateway, DynamoDB, Log Insights, and Lambda CloudWatch metrics for this burst. Takes ~10-15s."
+          >
+            &#128200; View results
+            <span class="text-[11px] font-normal opacity-75">(takes ~10-15s)</span>
+          </button>
+
+          <div
+            x-show="resultsLoading"
+            class="w-full py-2 px-4 rounded-lg bg-purple-100 text-purple-800 text-sm text-center"
+          >
+            Fetching AWS ground truth&hellip;
+          </div>
+
+          <div
+            x-show="resultsError"
+            class="w-full py-2 px-4 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs"
+          >
+            <div>Failed: <span class="font-mono" x-text="resultsError"></span></div>
+            <button @click="fetchResults()" class="mt-1 underline text-red-600 hover:text-red-800">Retry</button>
+          </div>
+
+          <div
+            x-show="results !== null"
+            class="space-y-3"
+          >
+            <!-- TOTALS: API Gateway count + Bookings in DDB -->
+            <div class="p-3 bg-white border border-purple-200 rounded">
+              <div class="text-[10px] font-medium text-purple-700 uppercase tracking-wide mb-2">
+                Requests & bookings &middot; from AWS ground truth
+              </div>
+              <div class="grid grid-cols-2 gap-3 text-center">
+                <div>
+                  <div class="text-[10px] text-slate-500 uppercase tracking-wide">API Gateway count</div>
+                  <div class="text-2xl font-bold font-mono text-purple-800" x-text="(results?.apigw_count ?? 0).toLocaleString()"></div>
+                  <div class="text-[10px] text-slate-400">total requests received</div>
+                </div>
+                <div>
+                  <div class="text-[10px] text-slate-500 uppercase tracking-wide">Bookings in DDB</div>
+                  <div class="text-2xl font-bold font-mono text-green-800" x-text="(results?.bookings ?? 0).toLocaleString()"></div>
+                  <div class="text-[10px] text-slate-400">durable rows committed</div>
+                </div>
+              </div>
+              <div class="mt-2 text-[10px] text-slate-500 border-t border-slate-100 pt-2">
+                Scanned <span x-text="results?.scanned_rows?.toLocaleString()"></span> DDB rows in
+                <span x-text="results?.scan_elapsed_s"></span>s.
+              </div>
+            </div>
+
+            <!-- PER-HANDLER HEALTH TABLE: EEs used + Lambda throttles + p99 latency -->
+            <div class="p-3 bg-white border border-indigo-200 rounded overflow-hidden">
+              <div class="text-[10px] font-medium text-indigo-700 uppercase tracking-wide mb-2">
+                Per-handler health &middot; execution environments and Lambda metrics
+              </div>
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-[10px] text-slate-500 uppercase tracking-wide border-b border-slate-200">
+                    <th class="text-left py-1 font-medium">Handler</th>
+                    <th class="text-right py-1 font-medium">EEs used</th>
+                    <th class="text-right py-1 font-medium">Lambda throttles</th>
+                    <th class="text-right py-1 font-medium">p95 latency</th>
+                    <th class="text-right py-1 font-medium">p99 latency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="h in (results?.handlers || [])" :key="h.handler">
+                    <tr class="border-b border-slate-100 last:border-b-0">
+                      <td class="py-2 font-mono text-xs text-slate-900" x-text="h.handler"></td>
+                      <td class="py-2 text-right font-mono text-slate-900" x-text="(h.distinct_ees_used ?? 0).toLocaleString()"></td>
+                      <td class="py-2 text-right font-mono"
+                          :class="(h.throttles ?? 0) > 0 ? 'text-red-700 font-bold' : 'text-slate-500'"
+                          x-text="(h.throttles ?? 0).toLocaleString()"></td>
+                      <td class="py-2 text-right font-mono text-slate-900" x-text="(h.p95_ms ?? 0).toFixed(1) + ' ms'"></td>
+                      <td class="py-2 text-right font-mono text-slate-900" x-text="(h.p99_ms ?? 0).toFixed(1) + ' ms'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              <div class="mt-2 text-[10px] text-slate-500 border-t border-slate-100 pt-2">
+                EEs used = distinct log streams that logged records tagged with this burst's
+                <span class="font-mono">event_id</span>. Latency percentiles from CloudWatch
+                <span class="font-mono">AWS/Lambda Duration</span>, taken as the peak of
+                60-second buckets across the burst window.
+              </div>
+            </div>
+
+            <button
+              @click="fetchResults()"
+              class="w-full text-[11px] text-slate-500 hover:text-slate-800 underline"
+            >
+              refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Ready-to-paste CLI queries for this burst -->
+        <details class="text-[11px] text-slate-500">
+          <summary class="cursor-pointer hover:text-slate-700">Ready-to-paste CLI queries</summary>
+          <div class="mt-2 space-y-3 pl-1">
+            <div>
+              <div class="text-slate-600 font-medium mb-1">Aggregate metrics for this burst</div>
+              <pre class="p-2 bg-slate-900 text-slate-100 rounded overflow-x-auto font-mono text-[10px] leading-tight" x-text="cliDashboard"></pre>
+            </div>
+            <div>
+              <div class="text-slate-600 font-medium mb-1">Count confirmed bookings for this event</div>
+              <pre class="p-2 bg-slate-900 text-slate-100 rounded overflow-x-auto font-mono text-[10px] leading-tight" x-text="cliBookingsCount"></pre>
+            </div>
+            <div>
+              <div class="text-slate-600 font-medium mb-1">Query raw wave records</div>
+              <pre class="p-2 bg-slate-900 text-slate-100 rounded overflow-x-auto font-mono text-[10px] leading-tight" x-text="cliSimMetrics"></pre>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <!-- App logic + Alpine.js (self-hosted, no external CDN).
+       Load order preserved: app.js first so demoApp() is registered on
+       window before Alpine initializes and evaluates x-data="demoApp()". -->
+  <script src="app.js"></script>
+  <script src="vendor/alpinejs-3.13.5.min.js"></script>
+</body>
+</html>

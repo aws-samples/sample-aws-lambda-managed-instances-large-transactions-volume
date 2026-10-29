@@ -1,0 +1,13 @@
+/* Small overrides on top of Tailwind */
+
+/* Hide the browser's default up/down spinners on <input type="number">.
+   The demo UI uses number inputs for target-TPS/duration/ramp; the
+   spinners crowd the field on Chrome and Firefox without adding value. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}

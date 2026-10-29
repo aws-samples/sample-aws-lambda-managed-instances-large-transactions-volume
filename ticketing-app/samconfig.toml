@@ -1,0 +1,31 @@
+# samconfig.toml — SAM CLI deployment configuration for the Ticketing App
+# Usage:
+#   sam build
+#   sam deploy
+
+version = 0.1
+
+[default.build.parameters]
+use_container = false
+cached = true
+
+[default.deploy.parameters]
+stack_name      = "ticketing-lmi"
+region          = "us-east-1"
+confirm_changeset = true
+capabilities    = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+resolve_s3      = true
+# Only VpcId and SubnetIds are overridden here because they have no
+# sensible template default (your account's VPC and subnets). Every other
+# parameter — CapacityProviderMaxVCpus, EE min/max, DDB billing, etc. —
+# is set in template.yaml as the single source of truth. Update template
+# defaults if you want to change them; samconfig only handles environment-
+# specific values.
+parameter_overrides = [
+  # scripts/deploy.sh patches these two values with the VPC + subnets you
+  # pass on the command line. If you deploy directly without deploy.sh,
+  # replace the placeholders with IDs from your own account.
+  "VpcId=REPLACE_WITH_YOUR_VPC_ID",
+  "SubnetIds=REPLACE_WITH_YOUR_SUBNET_IDS",
+]
+tags = "Project=ticketing-lmi"

@@ -1,0 +1,859 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Concert Ticketing App — Lambda Managed Instances backend.
+  Handles queue positioning, inventory locking, and booking confirmation
+  at up to 1M+ TPS using pre-provisioned EC2-backed Lambda functions.
+
+Parameters:
+  # VPC parameters — override with your own VPC/subnet/SG IDs
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where Lambda Managed Instances will run
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      At least two subnets in different AZs for HA.
+      Subnets must have outbound internet access (NAT Gateway or VPC endpoints)
+      so Lambda can send CloudWatch logs and X-Ray traces.
+
+  # Scaling parameters
+  CapacityProviderMaxVCpus:
+    Type: Number
+    Default: 2000
+    MinValue: 500
+    MaxValue: 10000
+    Description: >
+      Maximum vCPUs the LMI capacity provider may consume across all three
+      functions. Each c7i.4xlarge = 16 vCPUs, so 2000 vCPUs = up to 125
+      c7i.4xlarge instances. Baseline fleet at the template's MinExecutionEnvironments
+      settings uses ~1,200 vCPU (queue 50 + lock 100 + confirm 150 EEs at 4 vCPU each),
+      so the default 2000 cap allows ~1.7x burst headroom over baseline — enough for
+      the validated 40K TPS envelope with margin, without allowing the fleet to grow
+      unbounded under abuse. Raise explicitly if your workload needs more capacity;
+      budget alarms below give you spend visibility either way.
+      Requires an EC2 vCPU service quota increase (L-1216C47A,
+      'Running On-Demand Standard instances') to at least a few thousand vCPU
+      to give LMI headroom above this cap. Default account quota is 5-32 vCPU.
+
+  # CORS origin for the Ticketing API responses. The demo-ui's local serve.py
+  # listens on http://localhost:8000 by default; override to your deployed UI
+  # origin for a real deployment. Wildcard (*) is intentionally not supported
+  # because the API has no authorizer in the sample's dev path -- an open
+  # CORS policy combined with that would let any webpage drive bookings in a
+  # deployer's account.
+  AllowedOrigin:
+    Type: String
+    Default: "http://localhost:8000"
+    Description: >
+      Exact Origin header value permitted by the API Gateway CORS policy.
+      Set to your UI's origin (scheme + host + port). Do not set to '*'.
+
+  # Monthly spend guardrail for the LMI fleet. If left empty the budget
+  # resource is skipped and no email is sent. Supplying an email creates an
+  # AWS Budgets alarm that notifies at 80% and 100% of the configured amount.
+  BudgetNotificationEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$"
+    Description: >
+      Email address to notify when the ticketing stack's monthly AWS Budgets
+      alarm fires at 80% and 100% of BudgetMonthlyUsd. Leave empty to skip
+      creating the budget resource.
+
+  BudgetMonthlyUsd:
+    Type: Number
+    Default: 500
+    MinValue: 50
+    Description: >
+      Monthly budget threshold in USD for the ticketing stack's cost
+      allocation tag (Stack = this stack's name). Used only if
+      BudgetNotificationEmail is set.
+
+  DynamoDBBillingMode:
+    Type: String
+    Default: PAY_PER_REQUEST
+    AllowedValues: [PAY_PER_REQUEST, PROVISIONED]
+
+  # Networking — scope LMI outbound HTTPS to AWS service endpoints instead of
+  # the whole internet. Required: the LMI security group's only internet-
+  # facing egress rule is scoped to this prefix list; there is no open
+  # 0.0.0.0/0 fallback.
+  AwsServicesPrefixListId:
+    Type: String
+    Default: ""
+    Description: >
+      REQUIRED. Managed prefix list ID (pl-xxxxxxxx) covering the AWS service
+      endpoints the LMI functions must reach over HTTPS (CloudWatch Logs,
+      X-Ray, and — via a gateway endpoint — DynamoDB). The LMI security
+      group's 443 egress is scoped to this prefix list (never 0.0.0.0/0).
+      scripts/deploy.sh auto-discovers it; to find it manually:
+        aws ec2 describe-prefix-lists \
+          --filters Name=prefix-list-name,Values=com.amazonaws.<region>.dynamodb
+
+Rules:
+  # Fail fast at deploy time if no prefix list was supplied — otherwise the
+  # LMI functions would have no egress to AWS services and silently fail.
+  RequireAwsServicesPrefixList:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AwsServicesPrefixListId, ""]]
+        AssertDescription: >
+          AwsServicesPrefixListId is required. Provide the AWS-services managed
+          prefix list ID (e.g. the com.amazonaws.<region>.dynamodb gateway
+          endpoint prefix list) so LMI egress can be scoped to AWS service
+          endpoints. scripts/deploy.sh discovers and passes this automatically.
+
+Conditions:
+  # True when an AWS-services prefix list was supplied — enables scoped egress.
+  HasAwsServicesPrefixList: !Not [!Equals [!Ref AwsServicesPrefixListId, ""]]
+  # True when a budget notification email was supplied — enables the
+  # monthly-spend budget resource and its 80% / 100% alarms.
+  HasBudgetEmail: !Not [!Equals [!Ref BudgetNotificationEmail, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [x86_64]
+    Timeout: 10           # hard ceiling; functions target 30-100ms
+    MemorySize: 8192      # 8 GB
+    # X-Ray active tracing on all three handlers so request traces continue
+    # past the API Gateway edge into handler execution and the downstream
+    # DynamoDB / Redis calls (pairs with TracingEnabled on TicketingApi).
+    Tracing: Active
+    Environment:
+      Variables:
+        BOOKINGS_TABLE: !Ref BookingsTable
+        INVENTORY_TABLE: !Ref InventoryTable
+        HOLD_TTL_SECONDS: "180"  # seat hold window (3 min)
+        # Write-sharding for the inventory table. With SHARD_COUNT=500, seat
+        # writes distribute across 500 logical partition keys per event. This
+        # is sized to keep per-shard load below ~100 WCU/sec at 40K TPS burst
+        # (40K / 500 = 80 WCU/sec/shard) so no single physical partition heats
+        # up above the ~1K WCU/sec cap. An earlier iteration used 100 shards;
+        # under a fresh-table burst that produced ~500 WCU/sec/shard, which
+        # is safe on average but caused transient per-partition throttling
+        # during the first 30 seconds while DDB adaptive-scaled partitions.
+        # 500 provides 5x statistical smoothing across the initial physical
+        # partition count, eliminating the fresh-deploy first-burst tail.
+        # See InventoryTable KeySchema and the `_compute_pk` helper in
+        # inventory_lock / booking_confirm handlers.
+        INVENTORY_SHARD_COUNT: "500"
+
+# ---------------------------------------------------------------------------
+# IAM Roles
+# ---------------------------------------------------------------------------
+Resources:
+
+  # Operator role — Lambda uses this to launch/manage EC2 instances in your account
+  CapacityProviderOperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-cp-operator-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaManagedEC2ResourceOperator
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Lambda execution role — shared by all three functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-exec-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      # All permissions are attached as customer-managed policies (below)
+      # rather than inline `Policies`, per the "no inline policies on roles"
+      # standard. Managed policies are independently versioned and auditable.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # Required for Tracing: Active — lets the functions publish X-Ray
+        # trace segments (xray:PutTraceSegments / PutTelemetryRecords).
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - !Ref LambdaDynamoDBAccessPolicy
+        - !Ref LambdaTableKeyAccessPolicy
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Customer-managed policy: DynamoDB item access on the two ticketing tables.
+  LambdaDynamoDBAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-lambda-ddb-access"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:TransactWriteItems
+              - dynamodb:ConditionCheckItem
+            Resource:
+              - !GetAtt BookingsTable.Arn
+              - !GetAtt InventoryTable.Arn
+
+  # Customer-managed policy: use of the DynamoDB CMK. DynamoDB encrypts/
+  # decrypts items with the customer-managed CMK on the caller's behalf, so
+  # the execution role must be allowed to use the key. Scoped to the single
+  # CMK ARN via a kms:ViaService condition so the grant can't be used for
+  # other KMS operations.
+  LambdaTableKeyAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-lambda-ddb-key-access"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt TicketingTableKey.Arn
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+
+# ---------------------------------------------------------------------------
+# Networking — security group for capacity provider instances
+# ---------------------------------------------------------------------------
+
+  LMISecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-lmi-sg"
+      GroupDescription: Security group for Lambda Managed Instances - outbound only
+      VpcId: !Ref VpcId
+      # No inbound rules needed; Lambda's router handles all ingress.
+      #
+      # Egress is intentionally NOT declared inline here. EC2 auto-creates a
+      # default allow-all (0.0.0.0/0) egress rule only when a SecurityGroup is
+      # created with NO egress at all, so we attach the real egress rules as
+      # separate AWS::EC2::SecurityGroupEgress resources below. The first such
+      # rule replaces the default allow-all, leaving only the scoped rules we
+      # define — no open 0.0.0.0/0 egress remains.
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # HTTPS (443) egress to AWS service endpoints, scoped to the supplied
+  # managed prefix list (CloudWatch Logs, X-Ray, DynamoDB gateway endpoint).
+  # This is the ONLY internet-facing egress rule — there is no open
+  # 0.0.0.0/0 fallback, so AwsServicesPrefixListId must be provided (the
+  # deploy script auto-discovers it). Restricting the destination to a prefix
+  # list keeps the egress off the open internet, which security scanners flag.
+  LMISecurityGroupHttpsPrefixListEgress:
+    Condition: HasAwsServicesPrefixList
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LMISecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationPrefixListId: !Ref AwsServicesPrefixListId
+      Description: HTTPS outbound to AWS service endpoints (scoped prefix list)
+
+  # Egress rule so LMI EEs can reach ElastiCache Redis (port 6379).
+  # Defined as a separate resource to break a circular SG reference
+  # between LMISecurityGroup and RedisSecurityGroup.
+  LMISecurityGroupRedisEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !GetAtt LMISecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      DestinationSecurityGroupId: !GetAtt RedisSecurityGroup.GroupId
+      Description: Reach ElastiCache Redis for atomic queue counter
+
+# ---------------------------------------------------------------------------
+# ElastiCache Serverless (Valkey) — atomic queue counter
+# ---------------------------------------------------------------------------
+# Redis solves the hot-key bottleneck on the queue-position counter row:
+#   DynamoDB single-row atomic INCREMENT tops out at ~1-3K ops/sec (partition
+#   throughput cap). Redis handles the same operation at 1M+ ops/sec on a
+#   single key because it's in-memory.
+#
+# Used by: queue-position handler only. Inventory and bookings stay in DDB.
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-redis-sg"
+      GroupDescription: Ingress for ElastiCache Redis from LMI functions
+      VpcId: !Ref VpcId
+      # Redis is a passive receiver — clients connect to port 6379, stateful
+      # return traffic is allowed automatically by the security group. No
+      # outbound initiation is required. Egress rule scoped to localhost
+      # effectively blocks all real outbound while making intent explicit
+      # (satisfies cfn-lint F1000: no implicit allow-all egress).
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: No egress required; Redis is a passive receiver
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Ingress from LMI SG on Redis port. Defined separately from the SG
+  # itself so we can reference LMISecurityGroup without a circular ref.
+  RedisSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt RedisSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !GetAtt LMISecurityGroup.GroupId
+      Description: Redis TCP from LMI capacity provider
+
+  TicketingRedis:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName: !Sub "${AWS::StackName}-cache"
+      Description: Atomic queue-position counter for ticketing
+      Engine: valkey
+      MajorEngineVersion: "8"
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds:
+        - !GetAtt RedisSecurityGroup.GroupId
+      # Baseline capacity is auto-scaled. Set an upper bound so a runaway
+      # workload doesn't rack up unbounded ECPU cost.
+      CacheUsageLimits:
+        DataStorage:
+          Maximum: 5      # GB
+          Unit: GB
+        ECPUPerSecond:
+          Maximum: 5000000   # 5M ECPUs/sec — huge headroom for demo
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+# ---------------------------------------------------------------------------
+# Lambda Managed Instances — Capacity Provider
+# ---------------------------------------------------------------------------
+
+  TicketingCapacityProvider:
+    Type: AWS::Lambda::CapacityProvider
+    Properties:
+      CapacityProviderName: !Sub "${AWS::StackName}-ticketing-cp"
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !GetAtt LMISecurityGroup.GroupId
+      PermissionsConfig:
+        CapacityProviderOperatorRoleArn: !GetAtt CapacityProviderOperatorRole.Arn
+      InstanceRequirements:
+        Architectures:
+          - x86_64
+      CapacityProviderScalingConfig:
+        ScalingMode: Auto
+        MaxVCpuCount: !Ref CapacityProviderMaxVCpus
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+# ---------------------------------------------------------------------------
+# Lambda Functions (LMI)
+# ---------------------------------------------------------------------------
+
+  # 1. Queue Positioning — establishes where a user sits in the virtual queue
+  QueuePositionFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - TicketingCapacityProvider
+      - TicketingRedis
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-queue-position"
+      CodeUri: src/queue_position/
+      Handler: handler.lambda_handler
+      Description: >
+        Assigns a queue position via Redis atomic INCR. Falls back to
+        DynamoDB counter if Redis is unavailable.
+      Role: !GetAtt LambdaExecutionRole.Arn
+      # queue-position handler is Redis-backed at ~5ms p99 per invocation.
+      # It needs far less compute than the DDB writers, so we keep its
+      # baseline small (Min=50 EEs = 400 slots). Max=100 gives burst
+      # headroom. See docs/test-results.md for measured behaviour.
+      #
+      # NOTE: AWS::Serverless::Function silently ignores this property —
+      # values are applied by scripts/deploy.sh via put-function-scaling-config
+      # after publish-version. Keep in sync with SCALING_CONFIG in deploy.sh.
+      FunctionScalingConfig:
+        MinExecutionEnvironments: 50
+        MaxExecutionEnvironments: 100
+      CapacityProviderConfig:
+        Arn: !GetAtt TicketingCapacityProvider.Arn
+        PerExecutionEnvironmentMaxConcurrency: 8
+        ExecutionEnvironmentMemoryGiBPerVCpu: 2.0
+      # Per-function env vars are merged with Globals by SAM. Only REDIS_*
+      # is queue-position specific; BOOKINGS_TABLE/INVENTORY_TABLE/HOLD_TTL
+      # are inherited from Globals.
+      Environment:
+        Variables:
+          REDIS_ENDPOINT: !GetAtt TicketingRedis.Endpoint.Address
+          REDIS_PORT: !GetAtt TicketingRedis.Endpoint.Port
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TicketingApi
+            Path: /queue/position
+            Method: POST
+
+  # 2. Inventory Lock — reserves a seat with a short hold window
+  InventoryLockFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: TicketingCapacityProvider
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-inventory-lock"
+      CodeUri: src/inventory_lock/
+      Handler: handler.lambda_handler
+      Description: >
+        Performs an optimistic-locking seat reservation in DynamoDB.
+        Hold expires after HOLD_TTL_SECONDS if not confirmed.
+      Role: !GetAtt LambdaExecutionRole.Arn
+      # inventory-lock is the primary DynamoDB writer (7-18ms per invocation
+      # observed at 40K TPS). Min=100 EEs = 800 concurrent slots — enough for
+      # 40K TPS with headroom. Max=500 gives further headroom for spikes.
+      # See docs/test-results.md for measured behaviour.
+      FunctionScalingConfig:
+        MinExecutionEnvironments: 100
+        MaxExecutionEnvironments: 500
+      CapacityProviderConfig:
+        Arn: !GetAtt TicketingCapacityProvider.Arn
+        PerExecutionEnvironmentMaxConcurrency: 8
+        ExecutionEnvironmentMemoryGiBPerVCpu: 2.0
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TicketingApi
+            Path: /inventory/lock
+            Method: POST
+
+  # 3. Booking Confirmation — finalises the purchase and writes confirmation record
+  BookingConfirmFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: TicketingCapacityProvider
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-booking-confirm"
+      CodeUri: src/booking_confirm/
+      Handler: handler.lambda_handler
+      Description: >
+        Finalises a seat hold, generates a booking ID, and persists the
+        confirmation record to DynamoDB.
+      Role: !GetAtt LambdaExecutionRole.Arn
+      # booking-confirm executes DDB TransactWrite (40-60ms typical). Sized
+      # same as inventory-lock so the two writers scale together.
+      FunctionScalingConfig:
+        MinExecutionEnvironments: 150
+        MaxExecutionEnvironments: 500
+      CapacityProviderConfig:
+        Arn: !GetAtt TicketingCapacityProvider.Arn
+        PerExecutionEnvironmentMaxConcurrency: 8
+        ExecutionEnvironmentMemoryGiBPerVCpu: 2.0
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TicketingApi
+            Path: /booking/confirm
+            Method: POST
+
+# ---------------------------------------------------------------------------
+# API Gateway
+# ---------------------------------------------------------------------------
+
+  TicketingApi:
+    Type: AWS::Serverless::Api
+    # The stage's access logging depends on the account-level CloudWatch Logs
+    # role being in place first (AWS::ApiGateway::Account below), otherwise
+    # the deployment fails with "CloudWatch Logs role ARN must be set".
+    DependsOn: ApiGatewayAccount
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      StageName: v1
+      # Enable AWS X-Ray active tracing on the API Gateway stage so request
+      # traces span API Gateway → Lambda handlers → DynamoDB/Redis. Paired
+      # with Tracing: Active on the handlers (Globals) for end-to-end traces.
+      TracingEnabled: true
+      # Access logging — one structured JSON record per request written to a
+      # dedicated CloudWatch Logs group. Distinct from execution logging;
+      # these are the who/what/latency/status access records.
+      AccessLogSetting:
+        DestinationArn: !GetAtt TicketingApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","path":"$context.path",
+          "status":"$context.status","protocol":"$context.protocol",
+          "responseLength":"$context.responseLength",
+          "integrationLatency":"$context.integrationLatency",
+          "responseLatency":"$context.responseLatency"}
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        # Restricted to the configured UI origin. Wildcard CORS combined with
+        # AWS_IAM auth below would let any webpage initiate a SigV4-signed
+        # request in a victim's browser session; both controls together close
+        # the sample's exposure surface.
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      # AWS_IAM auth on every route: callers sign requests with SigV4 and the
+      # authenticated principal is available in event.requestContext.identity.
+      # user_id in each handler is derived from that principal, never trusted
+      # from the request body. SAM maps DefaultAuthorizer: AWS_IAM to
+      # AuthorizationType: AWS_IAM on each method it generates. See
+      # https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-property-api-apiauth.html
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+      Tags:
+        Stack: !Ref AWS::StackName
+
+  # CloudWatch Logs group receiving API Gateway access logs for the stage.
+  # Encrypted with a customer-managed CMK (TicketingLogsKey).
+  TicketingApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-api-access"
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt TicketingLogsKey.Arn
+
+  # --- Account-level API Gateway CloudWatch Logs role ---------------------
+  # API Gateway needs an account-level IAM role to write logs to CloudWatch.
+  # This is a REGION-GLOBAL, singleton setting (one AWS::ApiGateway::Account
+  # per account per region). It lives in the ticketing stack only; the
+  # simulation stack's access logging relies on this same account setting.
+  # If your account already configures this elsewhere, remove this resource
+  # (and the DependsOn above) to avoid fighting over the shared setting.
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+# ---------------------------------------------------------------------------
+# KMS — customer-managed CMK for DynamoDB encryption at rest
+# ---------------------------------------------------------------------------
+# Both DynamoDB tables are encrypted with this customer-managed key rather
+# than the AWS-owned default (SSEEnabled: true alone) or the AWS-managed
+# `aws/dynamodb` key. A CMK gives you control over the key policy, rotation,
+# and CloudTrail auditability of every encrypt/decrypt call.
+
+  TicketingTableKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Customer-managed CMK for ${AWS::StackName} DynamoDB tables"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Root account retains full administrative control of the key so it
+          # never becomes unmanageable (AWS-recommended baseline statement).
+          # Principals are granted key *usage* via their own IAM policies
+          # (see LambdaExecutionRole's DynamoDBTableKeyAccess policy); this
+          # root statement lets those IAM-policy grants take effect without
+          # creating a circular CFN dependency between the key and the role.
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Customer-managed CMK for the API Gateway access-log group. CloudWatch
+  # Logs requires the key policy to grant the logs service principal directly
+  # (an IAM-policy grant on a caller is not sufficient — Logs uses the key on
+  # your behalf). The condition scopes that grant to this account's log
+  # groups in-region via kms:EncryptionContext, per AWS guidance.
+  TicketingLogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Customer-managed CMK for ${AWS::StackName} CloudWatch Logs"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  TicketingLogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-logs"
+      TargetKeyId: !Ref TicketingLogsKey
+
+  TicketingTableKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-ddb"
+      TargetKeyId: !Ref TicketingTableKey
+
+# ---------------------------------------------------------------------------
+# AWS Budgets — monthly spend alarm (conditional on BudgetNotificationEmail)
+# ---------------------------------------------------------------------------
+# The LMI capacity provider bills for pre-warmed EC2 instances whether or not
+# the ticketing API receives traffic, so an abuse scenario or a stuck burst
+# can inflate costs quietly. This budget tracks spend tagged with
+# Stack = ${AWS::StackName} and emails the operator at 80% and 100% of the
+# configured monthly threshold. Only created when BudgetNotificationEmail is
+# supplied; otherwise the operator is expected to monitor via their own
+# organization budget.
+
+  TicketingBudget:
+    Condition: HasBudgetEmail
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${AWS::StackName}-monthly"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetMonthlyUsd
+          Unit: USD
+        CostFilters:
+          TagKeyValue:
+            - !Sub "user:Stack$${AWS::StackName}"
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetNotificationEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetNotificationEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetNotificationEmail
+
+# ---------------------------------------------------------------------------
+# DynamoDB Tables
+# ---------------------------------------------------------------------------
+
+  BookingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Handlers reference the table via !Ref so any future rename is
+      # picked up automatically. DeletionPolicy: Retain protects the
+      # booking history from `sam delete`; scripts/cleanup.sh is the
+      # authorized full-clean path. If you ever need to change KeySchema
+      # (immutable on DynamoDB), rename the table (e.g. add a `-v2`
+      # suffix) so CFN creates a fresh one alongside the old.
+      TableName: !Sub "${AWS::StackName}-bookings"
+      BillingMode: !Ref DynamoDBBillingMode
+      TableClass: STANDARD
+      # Set warm throughput so on-demand DDB serves the on-sale spike without
+      # waiting for adaptive capacity to expand. A new PAY_PER_REQUEST table
+      # defaults to 4K WCU warm; without this bump, the first minute of a
+      # 5K+ TPS run hits WriteThrottleEvents until DDB scales up.
+      WarmThroughput:
+        ReadUnitsPerSecond: 25000
+        WriteUnitsPerSecond: 25000
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Encrypt at rest with the customer-managed CMK (SSEType: KMS). Without
+      # SSEType the table uses the AWS-owned default key; with SSEEnabled +
+      # SSEType KMS + a KMSMasterKeyId it uses our CMK.
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TicketingTableKey
+      # No GSIs. Earlier iterations of this template had a `user-event-index`
+      # GSI on (user_id, event_id) for a hypothetical "my bookings" query,
+      # but no code path in this sample uses it. Under a 40K TPS burst the
+      # GSI's WriteCapacity ceiling (~8.7K WCU warm by default) throttled
+      # every TransactWriteItems, cascading into 5-7s Lambda tail latency
+      # and EE-pool saturation on booking-confirm. GSIs are not free: every
+      # base-table write incurs a GSI write, and GSI partition capacity
+      # scales independently. If your workload needs a GSI, size its
+      # WarmThroughput to your peak *write* rate, not the read rate you
+      # expect from it.
+      AttributeDefinitions:
+        - AttributeName: booking_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: booking_id
+          KeyType: HASH
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Inventory table with write-sharded partition key.
+  #
+  # Schema:
+  #   HASH  pk = f"{event_id}#{crc32(seat_id) % INVENTORY_SHARD_COUNT:03d}"
+  #   RANGE seat_id
+  #
+  # With SHARD_COUNT=500, writes distribute across 500 logical partition keys
+  # per event. At 40K TPS each shard sees ~80 WCU/sec on average, well below
+  # the ~1K WCU/sec per-physical-partition cap even under load-skew variance.
+  # `pk` is a deterministic function of (event_id, seat_id) so any handler
+  # can recompute it without a lookup. See `_compute_pk` in the handlers.
+  InventoryTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      # Handlers reference the table via !Ref, so any future rename is
+      # picked up automatically. DeletionPolicy: Delete because the seat
+      # pool is regenerated by every burst; nothing here is durable data.
+      # If you ever need to change KeySchema (immutable on DynamoDB),
+      # rename the table so CFN creates a fresh one alongside the old.
+      TableName: !Sub "${AWS::StackName}-inventory-sharded"
+      BillingMode: !Ref DynamoDBBillingMode
+      TableClass: STANDARD
+      # Pre-warm on-demand DDB to absorb the on-sale spike without waiting
+      # for adaptive capacity to expand. A new PAY_PER_REQUEST table defaults
+      # to 4K WCU warm; that is enough for ~5K TPS but throttles under the
+      # 40K TPS bursts this sample targets. 40K WCU is the AWS account-level
+      # per-table default cap; higher values require a Service Quotas
+      # increase for `Table-level write throughput limit` (L-AB614373).
+      WarmThroughput:
+        ReadUnitsPerSecond: 25000
+        WriteUnitsPerSecond: 40000
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Encrypt at rest with the customer-managed CMK (SSEType: KMS).
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref TicketingTableKey
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: seat_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: seat_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: hold_expires_at
+        Enabled: true
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+Outputs:
+  ApiEndpoint:
+    Description: >
+      API Gateway invoke URL for the ticketing app. Note: API Gateway is
+      throttled at the account level (default 10K rps; request an increase
+      via Service Quotas L-8A5B8E43 for higher targets).
+    Value: !Sub "https://${TicketingApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  RedisEndpoint:
+    Description: ElastiCache Serverless (Valkey) endpoint used by queue-position
+    Value: !Sub "${TicketingRedis.Endpoint.Address}:${TicketingRedis.Endpoint.Port}"
+    Export:
+      Name: !Sub "${AWS::StackName}-RedisEndpoint"
+
+  CapacityProviderArn:
+    Description: ARN of the Lambda Managed Instances capacity provider
+    Value: !GetAtt TicketingCapacityProvider.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CapacityProviderArn"
+
+  BookingsTableName:
+    Description: DynamoDB bookings table
+    Value: !Ref BookingsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-BookingsTable"
+
+  InventoryTableName:
+    Description: DynamoDB inventory table
+    Value: !Ref InventoryTable
+    Export:
+      Name: !Sub "${AWS::StackName}-InventoryTable"
+
+  TableKmsKeyArn:
+    Description: Customer-managed CMK encrypting the DynamoDB tables
+    Value: !GetAtt TicketingTableKey.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TableKmsKeyArn"

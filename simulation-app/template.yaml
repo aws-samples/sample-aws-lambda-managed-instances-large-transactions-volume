@@ -1,0 +1,639 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Concert Ticket Sale Simulation App.
+  Generates realistic HTTP load against the Ticketing App to demonstrate
+  AWS Lambda Managed Instances handling predictable traffic bursts.
+  The fan-out is designed to scale to arbitrary TPS targets — validated
+  end-to-end at 40K TPS (see docs/test-results.md).
+
+Parameters:
+  TicketingApiEndpoint:
+    Type: String
+    Description: >
+      Full base URL of the Ticketing App API Gateway endpoint.
+      Example: https://abc123.execute-api.us-east-1.amazonaws.com/v1
+
+  # Simulation parameters
+  #
+  # Defaults are set for a "hello world" smoke test that works against every
+  # AWS account without any Service Quotas increase: 1,000 TPS × 120 s stays
+  # under the default 10K rps API Gateway account throttle (L-8A5B8E43) and
+  # under the default 4K WCU DynamoDB warm-throughput ceiling. Override at
+  # deploy time (or with a runtime POST body to /simulation/start) to run
+  # larger scenarios (e.g. the 40K TPS × 120 s burst documented in
+  # docs/test-results.md).
+  TargetTps:
+    Type: Number
+    Default: 1000
+    Description: Target requests per second for the load simulation
+
+  RampDurationSeconds:
+    Type: Number
+    Default: 30
+    Description: Seconds to ramp from 0 to TargetTps
+
+  SustainDurationSeconds:
+    Type: Number
+    Default: 120
+    Description: Seconds to sustain peak load after ramp
+
+  SimulatedEvents:
+    Type: String
+    Default: "EVT-001"
+    Description: Comma-separated list of event IDs to simulate
+
+  SimulatedSeatsPerEvent:
+    Type: Number
+    Default: 2000000
+    Description: >
+      Number of unique seats available per simulated event. Sized so that
+      hits-per-seat stay low across the tested load range and no single
+      DDB partition heats up. At 40K TPS x 120s = ~4.8M request attempts
+      → ~1.6M sessions (3 HTTP calls per session), leaving each of the
+      2M seats hit ~0.8 times on average with plenty of headroom before
+      wrap-around contention. Do not reduce below 500K unless running
+      below 5K TPS target.
+
+  BurstSizePerWorker:
+    Type: Number
+    Default: 100
+    Description: >
+      Number of concurrent HTTP requests each load-worker Lambda fires per
+      invocation. At the calibrated per-request cost of ~100ms, each worker
+      delivers roughly 1,000 req/s while running; the orchestrator spawns
+      just enough workers each tick to meet TargetTps. See
+      orchestrator/handler.py `AVG_DURATION_S` and docs/test-results.md.
+
+  # Ground-truth query targets — used by /dashboard?include_ground_truth=true
+  # to compare the load workers' self-reported counts against AWS-side truth.
+  TicketingApiName:
+    Type: String
+    Default: "ticketing-lmi-api"
+    Description: >
+      Name of the Ticketing App API Gateway (the CloudWatch ApiName
+      dimension value). Used to fetch API Gateway `Count` metric as
+      HTTP ground truth. Must match the name attribute of the ticketing
+      stack's AWS::Serverless::Api resource.
+
+  BookingsTableName:
+    Type: String
+    Default: "ticketing-lmi-bookings"
+    Description: >
+      Name of the durable bookings DynamoDB table in the ticketing stack.
+      Scanned with a filter on event_id to return the true count of
+      committed booking rows for a given burst.
+
+  TicketingApiStage:
+    Type: String
+    Default: "v1"
+    Description: >
+      Stage name of the Ticketing API Gateway (the CloudWatch `Stage`
+      dimension value). Required alongside ApiName because CloudWatch's
+      ApiName-only aggregate for API Gateway `Count` has late-arriving
+      data and undercounts recent bursts; the (ApiName, Stage) metric
+      is authoritative.
+
+  # Cross-stack ground-truth scan feature flag. When the dashboard handler
+  # answers `?include_ground_truth=true`, it needs to Scan the ticketing
+  # stack's bookings table — a cross-stack read. The scan is useful during
+  # development (compare sim-side counts vs. AWS truth), but it grants the
+  # simulation execution role dynamodb:Scan on another stack's table and
+  # should be off by default. Set to "true" at deploy to enable; the
+  # dashboard handler returns 403 for ground-truth requests when disabled.
+  EnableGroundTruthScan:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set "true" to grant the simulation execution role dynamodb:Scan on
+      the ticketing stack's bookings table so /dashboard?include_ground_truth
+      can return the AWS-side durable booking count. Leave "false" (default)
+      to keep the two stacks' IAM strictly separated.
+
+  # CORS origin for the Simulation API responses. See the ticketing-app
+  # template for the same control. The demo-ui local serve.py listens on
+  # http://localhost:8000 by default; override to the UI's deployed origin.
+  AllowedOrigin:
+    Type: String
+    Default: "http://localhost:8000"
+    Description: >
+      Exact Origin header value permitted by the API Gateway CORS policy.
+      Set to your UI's origin (scheme + host + port). Do not set to '*'.
+
+  # Server-side clamps for the three runtime load parameters. The
+  # orchestrator applies these every invocation and rejects over-budget
+  # callers with 400 so cost is bounded even if the caller controls the
+  # request body. See simulation-app/src/orchestrator/handler.py.
+  MaxTargetTps:
+    Type: Number
+    Default: 40000
+    MinValue: 100
+    MaxValue: 1000000
+    Description: >
+      Hard ceiling on target_tps the orchestrator will accept per run. The
+      40000 default matches the end-to-end validated envelope; raise only
+      with a corresponding API Gateway, DynamoDB, and Lambda concurrency
+      quota increase.
+
+  MaxRampSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    MaxValue: 300
+    Description: >
+      Hard ceiling on ramp_duration_seconds the orchestrator will accept.
+      60 covers the standard "ramp to peak over one minute" shape.
+
+  MaxSustainSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 10
+    MaxValue: 900
+    Description: >
+      Hard ceiling on sustain_duration_seconds. 300 (5 minutes) is 2.5x the
+      validated 120 s run and leaves headroom under Lambda's 900 s timeout.
+      Longer sustains burn fleet capacity continuously and should require an
+      explicit template redeploy, not a request parameter.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [x86_64]
+    # 1024 MB (~0.5 vCPU) is the empirically calibrated floor for the
+    # load-worker's 128 concurrent HTTP threads and gives Orchestrator/
+    # Coordinator plenty of headroom for their I/O-bound work. Dashboard
+    # overrides to 2048 MB for the parallel bookings scan.
+    MemorySize: 1024
+    # Timeout default of 30 s is generous for Coordinator (returns <1 s
+    # normally). Orchestrator, load-worker, and Dashboard override with
+    # values matched to their actual workload.
+    Timeout: 30
+    Tracing: Active
+    Environment:
+      Variables:
+        TICKETING_API_ENDPOINT: !Ref TicketingApiEndpoint
+        TARGET_TPS: !Ref TargetTps
+        RAMP_DURATION_SECONDS: !Ref RampDurationSeconds
+        SUSTAIN_DURATION_SECONDS: !Ref SustainDurationSeconds
+        SIMULATED_EVENTS: !Ref SimulatedEvents
+        SIMULATED_SEATS_PER_EVENT: !Ref SimulatedSeatsPerEvent
+        BURST_SIZE: !Ref BurstSizePerWorker
+        METRICS_TABLE: !Ref SimMetricsTable
+        # Runtime-input clamp ceilings — orchestrator rejects any caller
+        # request above these as 400 Bad Request. See
+        # simulation-app/src/orchestrator/handler.py.
+        MAX_TARGET_TPS: !Ref MaxTargetTps
+        MAX_RAMP_SECONDS: !Ref MaxRampSeconds
+        MAX_SUSTAIN_SECONDS: !Ref MaxSustainSeconds
+
+Conditions:
+  # True when the operator opts into the cross-stack bookings-table scan.
+  # Gates the SimulationGroundTruthPolicy and the Lambda env variable the
+  # dashboard handler uses to decide whether to attempt the scan.
+  GroundTruthScanEnabled: !Equals [!Ref EnableGroundTruthScan, "true"]
+
+Resources:
+
+# ---------------------------------------------------------------------------
+# IAM
+# ---------------------------------------------------------------------------
+
+  SimulationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-sim-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      # Permissions attached as a customer-managed policy (below) rather than
+      # inline `Policies`, per the "no inline policies on roles" standard.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        # Required for Tracing: Active (set in Globals) — lets the simulation
+        # functions publish X-Ray trace segments.
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - !Ref SimulationPermissionsPolicy
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  # Customer-managed policy holding all simulation-stack permissions.
+  SimulationPermissionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-sim-permissions"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              # load_worker writes one row per wave; dashboard queries
+              # them back by run_id. No handler reads a single row or
+              # updates an existing one.
+              - dynamodb:PutItem
+              - dynamodb:Query
+            Resource: !GetAtt SimMetricsTable.Arn
+          # The metrics table is encrypted with a customer-managed CMK,
+          # so DynamoDB needs the caller's role to be allowed to use the
+          # key for the encrypt (PutItem) and decrypt (Query) paths.
+          # Scoped to DynamoDB via kms:ViaService.
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt SimMetricsTableKey.Arn
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-coordinator"
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-load-worker"
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-orchestrator"
+          - Effect: Allow
+            Action:
+              # Dashboard Lambda reads API Gateway Count and Lambda
+              # Throttles/Duration percentiles to enrich /dashboard
+              # responses. Only get_metric_statistics is used.
+              - cloudwatch:GetMetricStatistics
+            Resource: "*"
+          # Scan permission on the ticketing bookings table lives in a
+          # separate, conditional policy (SimulationGroundTruthPolicy
+          # below) so it is granted ONLY when the operator opts in via
+          # EnableGroundTruthScan=true. Default is no cross-stack scan.
+          # Logs Insights on the three ticketing handler log groups so
+          # the dashboard Lambda can derive post-burst EE counts (one
+          # log stream per EE lifetime) via `include_ee_stats=true`.
+          - Effect: Allow
+            Action:
+              - logs:StartQuery
+              - logs:StopQuery
+              - logs:GetQueryResults
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ticketing-lmi-queue-position:*"
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ticketing-lmi-inventory-lock:*"
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ticketing-lmi-booking-confirm:*"
+          # load_worker invokes the ticketing API, which is deployed with
+          # AuthorizationType: AWS_IAM. The handler SigV4-signs each POST
+          # with this role's credentials. Scoped to the operator's own
+          # account and region; operators who want to narrow further can
+          # add the ticketing API's rest-api-id to the ARN (replace the
+          # first wildcard with the specific restApiId from the ticketing
+          # stack's output).
+          - Effect: Allow
+            Action:
+              - execute-api:Invoke
+            Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/*"
+
+  # Conditional policy: cross-stack bookings-table scan for the dashboard
+  # ground-truth path. Attached to SimulationExecutionRole only when the
+  # operator sets EnableGroundTruthScan=true. Default-off keeps the two
+  # stacks' IAM strictly separated. Threat I-2 in docs/threat-model.md.
+  SimulationGroundTruthPolicy:
+    Condition: GroundTruthScanEnabled
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-sim-ground-truth"
+      Roles:
+        - !Ref SimulationExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:DescribeTable
+            Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BookingsTableName}"
+
+# ---------------------------------------------------------------------------
+# Lambda Functions
+# ---------------------------------------------------------------------------
+
+  # Orchestrator — called once per simulation run; fans out to coordinators
+  SimulationOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-orchestrator"
+      CodeUri: src/orchestrator/
+      Handler: handler.lambda_handler
+      Description: >
+        Drives the load simulation. Runs the ramp→sustain loop, invoking
+        coordinator Lambdas each tick. Each coordinator spawns N workers.
+        Example at 40K TPS: 1 coordinator × 40 workers × 100 requests ×
+        ~1,000 req/s/worker.
+      Role: !GetAtt SimulationExecutionRole.Arn
+      # 900 s = Lambda's hard maximum. Needed because ramp + sustain can
+      # be up to 15 min for long test scenarios.
+      Timeout: 900
+      # Hard cap on concurrent orchestrator invocations. A single
+      # simulation run takes ramp + sustain (up to 900 s); legitimate use
+      # is one run at a time with occasional overlap. Capping at 2 keeps
+      # one in-flight run plus one new submission; anything above that is
+      # rejected by Lambda with a TooManyRequestsException before the
+      # handler runs. This bounds the blast radius for authenticated
+      # callers even if some future same-origin bypass is found on the
+      # loopback proxy — see docs/threat-model.md E-5 and T-1.
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          COORDINATOR_FUNCTION_NAME: !Sub "${AWS::StackName}-coordinator"
+      Events:
+        SimApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SimulationApi
+            Path: /simulation/start
+            Method: POST
+
+  # Coordinator — middle fan-out tier.
+  # Orchestrator spawns ceil(workers_per_tick / MAX_WORKERS_PER_COORD)
+  # coordinators per tick; at 40K TPS that's 1 coordinator × 40 workers,
+  # at 1M TPS it's 10 coordinators × 100 workers.
+  CoordinatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-coordinator"
+      CodeUri: src/coordinator/
+      Handler: handler.lambda_handler
+      Description: >
+        Receives a "spawn N workers" instruction and invokes N load-worker
+        Lambdas concurrently via ThreadPoolExecutor. Fire-and-forget (async
+        invoke), so each coordinator returns in <200ms regardless of N.
+      Role: !GetAtt SimulationExecutionRole.Arn
+      # No overrides — inherits 1024 MB / 30 s from Globals. Coordinator
+      # is fire-and-forget and I/O-bound; the 30 s cap is 60× headroom
+      # over normal runtime.
+      Environment:
+        Variables:
+          WORKER_FUNCTION_NAME: !Sub "${AWS::StackName}-load-worker"
+
+  # Worker — fires the actual HTTP load against the Ticketing API
+  LoadWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-load-worker"
+      CodeUri: src/load_worker/
+      Handler: handler.lambda_handler
+      Description: >
+        Fires BURST_SIZE concurrent HTTP requests (queue→lock→confirm flow)
+        against the Ticketing API and records p50/p95/p99 latency metrics.
+        Each worker delivers ~1,000 req/s; the orchestrator scales worker
+        count to hit TargetTps.
+      Role: !GetAtt SimulationExecutionRole.Arn
+      # Memory inherits 1024 MB from Globals — floor for 128 concurrent
+      # urllib3 threads. At Lambda's default (128 MB) the worker hits
+      # Max Memory Used and GC pauses snowball into HTTP timeouts.
+      # Timeout 300 s is defensive headroom for tail-latency scenarios;
+      # happy path completes in 1-2 s.
+      Timeout: 300
+
+  # Dashboard data aggregator — queries the metrics table and returns JSON.
+  # Also serves `include_ground_truth=true` requests that additionally query
+  # API Gateway (CloudWatch) + the bookings table for AWS-side truth,
+  # which can take 5-15s on large tables.
+  MetricsDashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-dashboard"
+      CodeUri: src/dashboard/
+      Handler: handler.lambda_handler
+      Description: >
+        Aggregates raw metrics from DynamoDB and returns a performance
+        summary including TPS, p50/p95/p99 latency, and error rates.
+        With include_ground_truth=true, also queries API Gateway
+        CloudWatch metrics and the bookings table for AWS-side ground truth.
+      Role: !GetAtt SimulationExecutionRole.Arn
+      # 2048 MB is required for the parallel bookings scan — at 1024 MB
+      # the 10 concurrent scan threads thrash and push wall clock past
+      # API Gateway's 29 s hard timeout. At 2048 MB Lambda gets ~1.2 vCPU
+      # which brings a 1M-row parallel scan down to ~3-5 s.
+      # Timeout 90 s gives internal headroom for the parallel path even
+      # though API Gateway cuts the client off at 29 s.
+      MemorySize: 2048
+      Timeout: 90
+      Environment:
+        Variables:
+          TICKETING_API_NAME: !Ref TicketingApiName
+          TICKETING_API_STAGE: !Ref TicketingApiStage
+          BOOKINGS_TABLE_NAME: !Ref BookingsTableName
+          # Used to build /aws/lambda/{prefix}-{handler} log-group names for
+          # post-burst EE analysis (include_ee_stats=true).
+          TICKETING_STACK_PREFIX: ticketing-lmi
+          # "true" or "false" (string). Dashboard handler short-circuits
+          # ?include_ground_truth=true with 403 when this is "false", avoiding
+          # a scan attempt that would otherwise fail with AccessDenied once
+          # the SimulationGroundTruthPolicy is not attached.
+          ENABLE_GROUND_TRUTH_SCAN: !Ref EnableGroundTruthScan
+      Events:
+        DashboardApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SimulationApi
+            Path: /dashboard
+            Method: GET
+
+# ---------------------------------------------------------------------------
+# API Gateway
+# ---------------------------------------------------------------------------
+
+  SimulationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      StageName: v1
+      TracingEnabled: true
+      # Access logging — structured JSON per request to a dedicated log group.
+      # NOTE: API Gateway access logging requires the account-level CloudWatch
+      # Logs role (AWS::ApiGateway::Account). That singleton is created by the
+      # ticketing stack (ApiGatewayAccount), which scripts/deploy.sh always
+      # deploys before this stack. If you deploy this stack into an account
+      # where that role has never been configured, set it once first (see the
+      # ApiGatewayCloudWatchRole/ApiGatewayAccount pair in ticketing-app).
+      AccessLogSetting:
+        DestinationArn: !GetAtt SimulationApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","path":"$context.path",
+          "status":"$context.status","protocol":"$context.protocol",
+          "responseLength":"$context.responseLength",
+          "integrationLatency":"$context.integrationLatency",
+          "responseLatency":"$context.responseLatency"}
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        # Restricted to the configured UI origin. See AllowedOrigin parameter.
+        # Open CORS combined with AWS_IAM auth below would let any webpage
+        # drive signed requests through a victim's cached credentials; both
+        # controls together close that surface.
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      # AWS_IAM auth on every route. See ticketing-app template for the same
+      # pattern. Simulation /simulation/start provisions real capacity and
+      # bills the operator; this control blocks anonymous callers from
+      # starting bursts in the deployer's account.
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+      Tags:
+        Stack: !Ref AWS::StackName
+
+  # CloudWatch Logs group receiving API Gateway access logs for the stage.
+  # Encrypted with a customer-managed CMK (SimLogsKey).
+  SimulationApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-api-access"
+      RetentionInDays: 90
+      KmsKeyId: !GetAtt SimLogsKey.Arn
+
+# ---------------------------------------------------------------------------
+# KMS — customer-managed CMK for the metrics table encryption at rest
+# ---------------------------------------------------------------------------
+
+  SimMetricsTableKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Customer-managed CMK for ${AWS::StackName} metrics table"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Root retains admin control; the simulation execution role is
+          # granted key usage via its own IAM policy (SimulationPermissions),
+          # avoiding a circular dependency between the key and the role.
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  SimMetricsTableKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-metrics-ddb"
+      TargetKeyId: !Ref SimMetricsTableKey
+
+  # Customer-managed CMK for the API Gateway access-log group. CloudWatch
+  # Logs requires the key policy to grant the logs service principal directly;
+  # the condition scopes that grant to this account's in-region log groups.
+  SimLogsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Customer-managed CMK for ${AWS::StackName} CloudWatch Logs"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+  SimLogsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-logs"
+      TargetKeyId: !Ref SimLogsKey
+
+# ---------------------------------------------------------------------------
+# DynamoDB — raw metrics store
+# ---------------------------------------------------------------------------
+
+  SimMetricsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "${AWS::StackName}-metrics"
+      BillingMode: PAY_PER_REQUEST
+      # Enable point-in-time recovery (continuous backups, ~35-day restore
+      # window). Matches the ticketing tables. Note: items also carry a 7-day
+      # TTL, so PITR is what allows restoring a run's raw waves after the TTL
+      # sweep has expired them from the live table.
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Encrypt at rest with the customer-managed CMK (SSEType: KMS). Without
+      # an SSESpecification the table used the AWS-owned default key.
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref SimMetricsTableKey
+      AttributeDefinitions:
+        - AttributeName: run_id
+          AttributeType: S
+        - AttributeName: ts_ms
+          AttributeType: N
+      KeySchema:
+        - AttributeName: run_id
+          KeyType: HASH
+        - AttributeName: ts_ms
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true   # auto-expire records after 7 days
+      Tags:
+        - Key: Stack
+          Value: !Ref AWS::StackName
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+
+Outputs:
+  SimulationApiEndpoint:
+    Description: URL to trigger and monitor simulations
+    Value: !Sub "https://${SimulationApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+    Export:
+      Name: !Sub "${AWS::StackName}-SimApiEndpoint"
+
+  StartSimulationUrl:
+    Description: POST to this URL to start a simulation run
+    Value: !Sub "https://${SimulationApi}.execute-api.${AWS::Region}.amazonaws.com/v1/simulation/start"
+
+  DashboardUrl:
+    Description: GET to retrieve real-time metrics
+    Value: !Sub "https://${SimulationApi}.execute-api.${AWS::Region}.amazonaws.com/v1/dashboard"
+
+  MetricsTableKmsKeyArn:
+    Description: Customer-managed CMK encrypting the metrics DynamoDB table
+    Value: !GetAtt SimMetricsTableKey.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MetricsTableKmsKeyArn"

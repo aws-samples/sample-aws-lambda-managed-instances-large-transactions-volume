@@ -1,0 +1,31 @@
+# samconfig.toml — SAM CLI deployment configuration for the Simulation App
+# Deploy the Ticketing App first, then plug its API endpoint in here.
+# deploy.sh does this automatically.
+
+version = 0.1
+
+[default.build.parameters]
+use_container = false
+cached = true
+
+[default.deploy.parameters]
+stack_name      = "ticketing-simulation"
+region          = "us-east-1"
+confirm_changeset = true
+capabilities    = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+resolve_s3      = true
+# Only TicketingApiEndpoint is overridden here because it has no sensible
+# default (it depends on the ticketing stack you just deployed). Every
+# other parameter — TargetTps, RampDurationSeconds, SustainDurationSeconds,
+# SimulatedEvents, SimulatedSeatsPerEvent, BurstSizePerWorker — is set in
+# template.yaml as the single source of truth (defaults are the smoke-test
+# values: 1000 TPS × 120s). Override at runtime by passing them in the
+# POST body to /simulation/start.
+parameter_overrides = [
+  # scripts/deploy.sh patches this value with the Ticketing App's live
+  # API endpoint after the ticketing stack finishes deploying. If you
+  # deploy directly without deploy.sh, replace the placeholder with
+  # the `ApiEndpoint` output from the ticketing-lmi CloudFormation stack.
+  "TicketingApiEndpoint=REPLACE_WITH_TICKETING_API_ENDPOINT",
+]
+tags = "Project=ticketing-lmi"
