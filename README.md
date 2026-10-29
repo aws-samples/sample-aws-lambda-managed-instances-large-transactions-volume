@@ -263,11 +263,9 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 ## Cost
 
-> **The load generator spends real money.** Every burst launches EC2 capacity behind the LMI capacity provider and consumes on-demand DynamoDB and ElastiCache capacity on the ticketing side, plus Lambda invocations and DynamoDB on the simulation side. Fire a 40,000 TPS × 120 s burst and the AWS bill goes up by double-digit dollars; a stuck or looping burst keeps spending until you intervene. The optional `AWS::Budgets::Budget` alarm (see Security section) notifies at 80% / 100% of your configured monthly threshold when `BudgetNotificationEmail` is set.
+LMI uses Amazon EC2 instance pricing plus a 15% management fee. Compute Savings Plans and Reserved Instances apply to the underlying instance cost. The LMI configuration runs a small always-on baseline (nine execution environments handling browse traffic) and uses a scaling script to pre-warm to 300 execution environments in the minutes leading up to each event, then scales back down afterward.
 
-LMI uses **EC2 instance pricing + 15% management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
-
-The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands at around **$24,000/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
+Assuming the fleet is pre-warmed for a 7-minute window (5-minute ramp and 2-minute burst) then scaled back down, the estimated cost for simulating each burst is around $37.
 
 ## Security
 
