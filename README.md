@@ -8,11 +8,11 @@ Reference implementation showing how AWS Lambda Managed Instances (LMI) handles 
 
 A spike-tolerant ticketing system that stays warm through the on-sale moment and scales back down when the burst is over:
 
-- **Three-phase booking flow** — `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce
+- **Three-phase booking flow** — `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
+- **Pre-warm operational pattern** — `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
 - **Sharded DynamoDB + Redis** — 500-way sharded inventory table for parallel writes, Redis Serverless for the atomic queue counter
 - **Bundled load generator** — three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
 - **Optional web UI** — single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
-- **Pre-warm operational pattern** — `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
 
 ### Key Features
 
@@ -213,7 +213,7 @@ curl -X POST https://<sim-api>/v1/simulation/start \
 curl "https://<sim-api>/v1/dashboard?run_id=onsale-run-1"
 ```
 
-Example response (from the validated 40 K TPS × 120 s headline run):
+Example response (from the validated 40,000 TPS × 120 s headline run):
 
 ```json
 {
@@ -263,11 +263,11 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 ## Cost
 
-> **The load generator spends real money.** Every burst launches EC2 capacity behind the LMI capacity provider and consumes on-demand DynamoDB and ElastiCache capacity on the ticketing side, plus Lambda invocations and DynamoDB on the simulation side. Fire a 40K TPS × 120 s burst and the AWS bill goes up by double-digit dollars; a stuck or looping burst keeps spending until you intervene. The optional `AWS::Budgets::Budget` alarm (see Security section) notifies at 80% / 100% of your configured monthly threshold when `BudgetNotificationEmail` is set.
+> **The load generator spends real money.** Every burst launches EC2 capacity behind the LMI capacity provider and consumes on-demand DynamoDB and ElastiCache capacity on the ticketing side, plus Lambda invocations and DynamoDB on the simulation side. Fire a 40,000 TPS × 120 s burst and the AWS bill goes up by double-digit dollars; a stuck or looping burst keeps spending until you intervene. The optional `AWS::Budgets::Budget` alarm (see Security section) notifies at 80% / 100% of your configured monthly threshold when `BudgetNotificationEmail` is set.
 
 LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
-The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands at around **$24 K/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
+The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands at around **$24,000/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
 
 ## Security
 
