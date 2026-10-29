@@ -18,7 +18,7 @@ A spike-tolerant ticketing system that stays warm through the on-sale moment and
 
 - **Validated at 40,000 TPS × 120 s** — p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
 - **Per-EE scale-up in 1–2 seconds** — no cold starts; capacity is warm before on-sale opens
-- **EC2 pricing model** — Savings Plans and Reserved Instances apply; ~$24 K/yr with a cost-optimized `MinEE` baseline + pre-warm
+- **EC2 pricing model** — Savings Plans and Reserved Instances apply; ~$24,000/year with a cost-optimized `MinEE` baseline + pre-warm
 - **Same Lambda programming model** — no Dockerfile, no ECS task definitions
 - **Multi-concurrent handlers** — one execution environment serves 8 simultaneous requests when handlers are thread-safe
 - **Reproducible burst tests** — smoke, ramp, and on-sale scenarios out of the box
@@ -265,7 +265,7 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 > **The load generator spends real money.** Every burst launches EC2 capacity behind the LMI capacity provider and consumes on-demand DynamoDB and ElastiCache capacity on the ticketing side, plus Lambda invocations and DynamoDB on the simulation side. Fire a 40,000 TPS × 120 s burst and the AWS bill goes up by double-digit dollars; a stuck or looping burst keeps spending until you intervene. The optional `AWS::Budgets::Budget` alarm (see Security section) notifies at 80% / 100% of your configured monthly threshold when `BudgetNotificationEmail` is set.
 
-LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
+LMI uses **EC2 instance pricing + 15% management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
 The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands at around **$24,000/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
 
