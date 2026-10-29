@@ -99,8 +99,8 @@ Your deployment role needs these in addition to standard SAM permissions:
 │   ├── scale-for-onsale.sh            # Manual pre-warm / scale-down trigger
 │   └── cleanup.sh                     # Delete both stacks + retained tables
 │
-├── docs/                              # Architecture, booking flow, deployment topology,
-│                                      # test results, cost analysis
+├── docs/                              # Architecture, booking flow
+│
 └── README.md
 ```
 
