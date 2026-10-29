@@ -267,7 +267,7 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
-The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands around **$24 K/year**, roughly **20× cheaper than always-on peak EC2** for the same workload shape. Savings Plans and Reserved Instances apply to the EC2 portion.
+The template ships tuned for immediate 40,000 TPS testing (`MinEE` 50 / 100 / 150 = 300 EEs = 75 c7i.4xlarge baseline). For production use with a handful of on-sale events per year, drop `MinEE` low (e.g. 3 per handler = 9 EEs) and use `scripts/scale-for-onsale.sh` to pre-warm to 300 EEs before each event. That operational pattern lands around **$24 K/year**. Savings Plans and Reserved Instances apply to the EC2 portion.
 
 ## Security
 
