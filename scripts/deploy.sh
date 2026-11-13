@@ -192,13 +192,16 @@ done
 # AWS::Serverless::Function silently ignores the FunctionScalingConfig
 # property, so the min/max EE values baked into template.yaml are not
 # applied by CFN. Set them explicitly here against $LATEST.PUBLISHED.
-# Values match the FunctionScalingConfig blocks in ticketing-app/template.yaml.
+#
+# Default = minimum cost. Three warm EEs total, one EC2 instance at idle.
+# For peak-load testing (e.g. 40K TPS), scale each handler to the values
+# captured in README "Peak-load testing" before firing a burst.
 echo ""
 echo "==== Applying FunctionScalingConfig (Min/Max Execution Environments) ===="
 declare -a SCALING_CONFIG=(
-  "queue-position:50:100"
-  "inventory-lock:100:500"
-  "booking-confirm:150:500"
+  "queue-position:1:3"
+  "inventory-lock:1:3"
+  "booking-confirm:1:3"
 )
 for CFG in "${SCALING_CONFIG[@]}"; do
   IFS=':' read -r FUNC MIN_EE MAX_EE <<< "$CFG"
@@ -312,13 +315,13 @@ echo "Both samconfig.toml files have been updated — run 'sam deploy' directly"
 echo "from either app directory to redeploy without passing parameters again."
 echo ""
 echo "To trigger a simulation run:"
-echo "  # Smoke test (works with default AWS quotas):"
+echo "  # Smoke test (works on the deploy defaults, no pre-warming required):"
 echo "  curl -X POST ${SIM_API_ENDPOINT}/simulation/start \\"
 echo "       -H 'Content-Type: application/json' \\"
-echo "       -d '{\"target_tps\": 1000, \"ramp_duration_seconds\": 30, \"sustain_duration_seconds\": 120}'"
+echo "       -d '{\"target_tps\": 50, \"ramp_duration_seconds\": 10, \"sustain_duration_seconds\": 60}'"
 echo ""
-echo "  # Higher-TPS run (needs API Gateway quota increase; see README):"
-echo "  #   -d '{\"target_tps\": 40000, \"ramp_duration_seconds\": 0, \"sustain_duration_seconds\": 120}'"
+echo "  # Peak-load test (needs pre-warming — see README \"Peak-load testing\" — and the API Gateway quota increase):"
+echo "  #   -d '{\"target_tps\": 40000, \"ramp_duration_seconds\": 30, \"sustain_duration_seconds\": 120}'"
 echo ""
 echo "AWS console links:"
 echo "  Lambda functions (per-function invocations / duration / errors / throttles):"
