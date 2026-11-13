@@ -131,7 +131,7 @@ The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max
 | `inventory-lock` | 100 | 500 |
 | `booking-confirm` | 150 | 500 |
 
-These are the exact values used for the headline test; LMI pre-provisions roughly 75 `c7i.4xlarge` instances at this scale. See [`docs/test-results.md`](docs/test-results.md) for the full measurement report. After the test, return the handlers to the deploy defaults (`Min=1, Max=3`) to minimise idle cost.
+These are the exact values used for the headline test; LMI pre-provisions roughly 75 `c7i.4xlarge` instances at this scale. After the test, return the handlers to the deploy defaults (`Min=1, Max=3`) to minimise idle cost.
 
 ## Local Handler Testing
 
