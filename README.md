@@ -123,15 +123,17 @@ The default threshold is set by the `BudgetMonthlyUsd` template parameter; overr
 
 ### Peak-load testing
 
-The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, scale each handler to the per-function values below before firing a burst. Apply them via `scripts/scale-for-onsale.sh`, the AWS CLI, or the Lambda console.
+The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
 
-| Handler | Min EEs | Max EEs |
-|---|---|---|
-| `queue-position` | 50 | 100 |
-| `inventory-lock` | 100 | 500 |
-| `booking-confirm` | 150 | 500 |
+```bash
+./scripts/scale-for-onsale.sh us-east-1 150 500
+```
 
-These are the exact values used for the headline test; LMI pre-provisions roughly 75 `c7i.4xlarge` instances at this scale. After the test, return the handlers to the deploy defaults (`Min=1, Max=3`) to minimise idle cost.
+After the test, return to the deploy defaults to minimise idle cost:
+
+```bash
+./scripts/scale-for-onsale.sh us-east-1 1 3
+```
 
 ## Local Handler Testing
 
@@ -171,7 +173,7 @@ curl -X POST https://<sim-api>/v1/simulation/start \
      }'
 ```
 
-**Peak-load test** — reproduces the headline 40K TPS result. Requires pre-warming the handlers to the per-function values in [Peak-load testing](#peak-load-testing), and the API Gateway account throttle increase in Prerequisites:
+**Peak-load test** — reproduces the headline 40K TPS result. Requires pre-warming per the [Peak-load testing](#peak-load-testing) section and the API Gateway account throttle increase in Prerequisites:
 
 ```bash
 curl -X POST https://<sim-api>/v1/simulation/start \
