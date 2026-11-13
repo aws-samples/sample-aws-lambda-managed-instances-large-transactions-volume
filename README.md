@@ -2,7 +2,7 @@
 
 > This is sample code, for non-production usage. You should work with your security and legal teams to meet your organizational security, regulatory and compliance requirements before deployment.
 
-Reference implementation showing how AWS Lambda Managed Instances (LMI) handles predictable traffic bursts — the on-sale surge pattern common to concert tickets, product launches, and other scheduled events. Validated at **40,000 TPS × 120 s** with **p99 121 ms** and zero Lambda-side errors.
+Reference implementation showing how AWS Lambda Managed Instances (LMI) handles predictable traffic bursts - the on-sale surge pattern common to concert tickets, product launches, and other scheduled events. Validated at **40,000 TPS × 120 s** with **p99 121 ms** and zero Lambda-side errors.
 
 ## What is This Project?
 
@@ -10,37 +10,37 @@ A spike-tolerant ticketing system that stays warm through the on-sale moment and
 
 - **Three-phase booking flow** - `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
 - **Pre-warm operational pattern** - `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
-- **Sharded DynamoDB + Redis** - 500-way sharded inventory table for parallel writes, Redis Serverless for the atomic queue counter
+- **Sharded DynamoDB + ElastiCache** - 500-way sharded inventory table for parallel writes, Amazon ElastiCache Serverless for the atomic queue counter
 - **Bundled load generator** - three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
-- **Optional web UI** — single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
+- **Optional web UI** - single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
 
 ### Key Features
 
-- **Validated at 40,000 TPS × 120 s** — p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
-- **Per-EE scale-up in 1–2 seconds** — no cold starts; capacity is warm before on-sale opens
-- **EC2 pricing model** — Savings Plans and Reserved Instances apply
-- **Same Lambda programming model** — no Dockerfile, no ECS task definitions
-- **Multi-concurrent handlers** — one execution environment serves 8 simultaneous requests when handlers are thread-safe
-- **Reproducible burst tests** — smoke and peak-load scenarios out of the box
+- **Validated at 40,000 TPS × 120 s** - p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
+- **Per-EE scale-up in 1–2 seconds** - no cold starts; capacity is warm before on-sale opens
+- **EC2 pricing model** - Savings Plans and Reserved Instances apply
+- **Same Lambda programming model** - no Dockerfile, no ECS task definitions
+- **Multi-concurrent handlers** - one execution environment serves 8 simultaneous requests when handlers are thread-safe
+- **Reproducible burst tests** - smoke and peak-load scenarios out of the box
 
 ## Architecture
 
 ![Architecture](docs/images/architecture.png)
 
-Three LMI-backed Lambda handlers behind API Gateway. Redis Serverless holds the atomic queue counter; DynamoDB holds durable per-seat state across a write-sharded inventory table and a bookings table. A separate simulation stack fans out load into the ticketing API to reproduce the on-sale burst.
+Three LMI-backed Lambda handlers behind API Gateway. Amazon ElastiCache Serverless holds the atomic queue counter; DynamoDB holds durable per-seat state across a write-sharded inventory table and a bookings table. A separate simulation stack fans out load into the ticketing API to reproduce the on-sale burst.
 
 Deep dives:
-- [`docs/architecture.md`](docs/architecture.md) — Component details, LMI concepts, load-generator math, concurrency safety
-- [`docs/booking-flow.md`](docs/booking-flow.md) — Request sequence diagram and error paths
+- [`docs/architecture.md`](docs/architecture.md) - Component details, LMI concepts, load-generator math, concurrency safety
+- [`docs/booking-flow.md`](docs/booking-flow.md) - Request sequence diagram and error paths
 
 ## Prerequisites
 
 - **AWS CLI v2** configured with sufficient IAM permissions
 - **AWS SAM CLI** (`pip install aws-sam-cli`)
-- **Python 3.13+** with `boto3` installed (`pip install boto3`) — matches the Lambda runtime and is used by the deploy/scale/cleanup scripts
+- **Python 3.13+** with `boto3` installed (`pip install boto3`) - matches the Lambda runtime and is used by the deploy/scale/cleanup scripts
 - **An existing Amazon VPC** with:
   - At least 2 subnets in different AZs (3 recommended)
-  - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs — LMI needs outbound HTTPS to send telemetry
+  - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs - LMI needs outbound HTTPS to send telemetry
 - **AWS Service Quotas** - the deploy defaults fit inside default account quotas; no increase required for a fresh deploy. Peak-load testing requires EC2 vCPU and API Gateway throttle increases.
 - **IAM Permissions** required for performing actions with SAM and LMI
 
@@ -145,8 +145,6 @@ sam build
 echo '{"httpMethod":"GET","pathParameters":{"event_id":"EVENT123"},"requestContext":{"identity":{"userArn":"arn:aws:iam::123456789012:user/alice"}}}' \
   | sam local invoke QueuePositionFunction --event -
 
-# Or point at an event file
-sam local invoke InventoryLockFunction --event test-events/inventory-lock.json
 ```
 
 Available function logical IDs:
