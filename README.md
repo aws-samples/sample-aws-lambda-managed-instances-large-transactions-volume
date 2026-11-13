@@ -18,7 +18,7 @@ A spike-tolerant ticketing system that stays warm through the on-sale moment and
 
 - **Validated at 40,000 TPS × 120 s** — p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
 - **Per-EE scale-up in 1–2 seconds** — no cold starts; capacity is warm before on-sale opens
-- **EC2 pricing model** — Savings Plans and Reserved Instances apply; ~$24,000/year with a cost-optimized `MinEE` baseline + pre-warm
+- **EC2 pricing model** — Savings Plans and Reserved Instances apply
 - **Same Lambda programming model** — no Dockerfile, no ECS task definitions
 - **Multi-concurrent handlers** — one execution environment serves 8 simultaneous requests when handlers are thread-safe
 - **Reproducible burst tests** — smoke and peak-load scenarios out of the box
@@ -41,7 +41,7 @@ Deep dives:
 - **An existing Amazon VPC** with:
   - At least 2 subnets in different AZs (3 recommended)
   - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs — LMI needs outbound HTTPS to send telemetry
-- **AWS Service Quota headroom** — the shipped defaults request ~1,200 vCPU of EC2 capacity, well above default account quotas. See [`Service-Quotas`](docs/deployment-topology.md#service-quotas) for the exact quotas to request. `scripts/deploy.sh` also prints the requirements in its post-deploy summary.
+- **AWS Service Quotas** - the deploy defaults fit inside default account quotas; no increase required for a fresh deploy. Peak-load testing requires EC2 vCPU and API Gateway throttle increases.
 - **IAM Permissions** required for performing actions with SAM and LMI
 
 ## Project Structure
@@ -97,7 +97,7 @@ This script:
 4. Builds and deploys the **Simulation App**, wiring in the live Ticketing API endpoint
 5. Prints both API endpoints, the required Service Quota values, and a ready-to-run curl command
    
-> **Note:** The Execution Environment defaults are `Min=1, Max=3` on all three handlers — cost-safe for a fresh deploy. See [Peak-load testing](#peak-load-testing) for the values used to reproduce the headline 40K TPS result.
+> **Note:** The Execution Environment defaults are `Min=1, Max=3` on all three handlers. See [Peak-load testing](#peak-load-testing) for the values used to reproduce the headline 40K TPS result.
 
 ### Option 2: Manual
 
