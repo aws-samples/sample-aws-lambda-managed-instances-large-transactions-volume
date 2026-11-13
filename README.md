@@ -8,10 +8,10 @@ Reference implementation showing how AWS Lambda Managed Instances (LMI) handles 
 
 A spike-tolerant ticketing system that stays warm through the on-sale moment and scales back down when the burst is over:
 
-- **Three-phase booking flow** — `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
-- **Pre-warm operational pattern** — `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
-- **Sharded DynamoDB + Redis** — 500-way sharded inventory table for parallel writes, Redis Serverless for the atomic queue counter
-- **Bundled load generator** — three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
+- **Three-phase booking flow** - `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
+- **Pre-warm operational pattern** - `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
+- **Sharded DynamoDB + Redis** - 500-way sharded inventory table for parallel writes, Redis Serverless for the atomic queue counter
+- **Bundled load generator** - three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
 - **Optional web UI** — single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
 
 ### Key Features
