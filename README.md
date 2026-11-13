@@ -2,46 +2,46 @@
 
 > This is sample code, for non-production usage. You should work with your security and legal teams to meet your organizational security, regulatory and compliance requirements before deployment.
 
-Reference implementation showing how AWS Lambda Managed Instances (LMI) handles predictable traffic bursts — the on-sale surge pattern common to concert tickets, product launches, and other scheduled events. Validated at **40,000 TPS × 120 s** with **p99 121 ms** and zero Lambda-side errors.
+Reference implementation showing how AWS Lambda Managed Instances (LMI) handles predictable traffic bursts - the on-sale surge pattern common to concert tickets, product launches, and other scheduled events. Validated at **40,000 TPS × 120 s** with **p99 121 ms** and zero Lambda-side errors.
 
 ## What is This Project?
 
 A spike-tolerant ticketing system that stays warm through the on-sale moment and scales back down when the burst is over:
 
-- **Three-phase booking flow** — `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
-- **Pre-warm operational pattern** — `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
-- **Sharded DynamoDB + Redis** — 500-way sharded inventory table for parallel writes, Redis Serverless for the atomic queue counter
-- **Bundled load generator** — three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
-- **Optional web UI** — single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
+- **Three-phase booking flow** - `queue-position` → `inventory-lock` → `booking-confirm`, the standard queue-plus-hold-and-confirm pattern for inventory-constrained e-commerce built using AWS Lambda Managed Instances
+- **Pre-warm operational pattern** - `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling knobs and a script for the "warm up before, scale down after" workflow
+- **Sharded DynamoDB + ElastiCache** - 500-way sharded inventory table for parallel writes, Amazon ElastiCache Serverless for the atomic queue counter
+- **Bundled load generator** - three-tier Lambda fan-out (orchestrator → coordinator → worker) that reproduces the on-sale burst shape at any target TPS
+- **Optional web UI** - single-page Alpine.js panel for firing bursts and viewing per-burst results without curl gymnastics
 
 ### Key Features
 
-- **Validated at 40,000 TPS × 120 s** — p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
-- **Per-EE scale-up in 1–2 seconds** — no cold starts; capacity is warm before on-sale opens
-- **EC2 pricing model** — Savings Plans and Reserved Instances apply; ~$24,000/year with a cost-optimized `MinEE` baseline + pre-warm
-- **Same Lambda programming model** — no Dockerfile, no ECS task definitions
-- **Multi-concurrent handlers** — one execution environment serves 8 simultaneous requests when handlers are thread-safe
-- **Reproducible burst tests** — smoke, ramp, and on-sale scenarios out of the box
+- **Validated at 40,000 TPS × 120 s** - p99 121 ms end-to-end, zero Lambda-side errors, zero throttles
+- **Per-EE scale-up in 1–2 seconds** - no cold starts; capacity is warm before on-sale opens
+- **EC2 pricing model** - Savings Plans and Reserved Instances apply
+- **Same Lambda programming model** - no Dockerfile, no ECS task definitions
+- **Multi-concurrent handlers** - one execution environment serves 8 simultaneous requests when handlers are thread-safe
+- **Reproducible burst tests** - smoke and peak-load scenarios out of the box
 
 ## Architecture
 
 ![Architecture](docs/images/architecture.png)
 
-Three LMI-backed Lambda handlers behind API Gateway. Redis Serverless holds the atomic queue counter; DynamoDB holds durable per-seat state across a write-sharded inventory table and a bookings table. A separate simulation stack fans out load into the ticketing API to reproduce the on-sale burst.
+Three LMI-backed Lambda handlers behind API Gateway. Amazon ElastiCache Serverless holds the atomic queue counter; DynamoDB holds durable per-seat state across a write-sharded inventory table and a bookings table. A separate simulation stack fans out load into the ticketing API to reproduce the on-sale burst.
 
 Deep dives:
-- [`docs/architecture.md`](docs/architecture.md) — Component details, LMI concepts, load-generator math, concurrency safety
-- [`docs/booking-flow.md`](docs/booking-flow.md) — Request sequence diagram and error paths
+- [`docs/architecture.md`](docs/architecture.md) - Component details, LMI concepts, load-generator math, concurrency safety
+- [`docs/booking-flow.md`](docs/booking-flow.md) - Request sequence diagram and error paths
 
 ## Prerequisites
 
 - **AWS CLI v2** configured with sufficient IAM permissions
 - **AWS SAM CLI** (`pip install aws-sam-cli`)
-- **Python 3.13+** with `boto3` installed (`pip install boto3`) — matches the Lambda runtime and is used by the deploy/scale/cleanup scripts
+- **Python 3.13+** with `boto3` installed (`pip install boto3`) - matches the Lambda runtime and is used by the deploy/scale/cleanup scripts
 - **An existing Amazon VPC** with:
   - At least 2 subnets in different AZs (3 recommended)
-  - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs — LMI needs outbound HTTPS to send telemetry
-- **AWS Service Quota headroom** — the shipped defaults request ~1,200 vCPU of EC2 capacity, well above default account quotas. See [`Service-Quotas`](docs/deployment-topology.md#service-quotas) for the exact quotas to request. `scripts/deploy.sh` also prints the requirements in its post-deploy summary.
+  - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs - LMI needs outbound HTTPS to send telemetry
+- **AWS Service Quotas** - the deploy defaults fit inside default account quotas; no increase required for a fresh deploy. Peak-load testing requires EC2 vCPU and API Gateway throttle increases.
 - **IAM Permissions** required for performing actions with SAM and LMI
 
 ## Project Structure
@@ -96,6 +96,8 @@ This script:
 3. Publishes Lambda function versions and applies the per-function `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling config via `put-function-scaling-config` (SAM's `AWS::Serverless::Function` silently ignores the nested property, so the script applies it explicitly)
 4. Builds and deploys the **Simulation App**, wiring in the live Ticketing API endpoint
 5. Prints both API endpoints, the required Service Quota values, and a ready-to-run curl command
+   
+> **Note:** The Execution Environment defaults are `Min=1, Max=3` on all three handlers. See [Peak-load testing](#peak-load-testing) for the values used to reproduce the headline 40K TPS result.
 
 ### Option 2: Manual
 
@@ -119,6 +121,20 @@ BUDGET_EMAIL=ops@example.com \
 
 The default threshold is set by the `BudgetMonthlyUsd` template parameter; override it in `ticketing-app/samconfig.toml` or on the SAM CLI if you want a different ceiling. If `BUDGET_EMAIL` is unset the deploy proceeds without the alarm.
 
+### Peak-load testing
+
+The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
+
+```bash
+./scripts/scale-for-onsale.sh us-east-1 150 500
+```
+
+After the test, return to the deploy defaults to minimise idle cost:
+
+```bash
+./scripts/scale-for-onsale.sh us-east-1 1 3
+```
+
 ## Local Handler Testing
 
 For a quick sanity check without deploying, each handler can be invoked locally with the SAM CLI. This runs the function in a Docker container with the environment variables from `template.yaml` and your current AWS credentials, so AWS SDK calls go to real DynamoDB and ElastiCache. It is useful for validating handler logic, request-schema parsing, and env-var wiring before paying for a full deploy. `sam local invoke` does **not** emulate the LMI capacity provider (that path is service-side); for end-to-end runs, use `scripts/deploy.sh`.
@@ -131,8 +147,6 @@ sam build
 echo '{"httpMethod":"GET","pathParameters":{"event_id":"EVENT123"},"requestContext":{"identity":{"userArn":"arn:aws:iam::123456789012:user/alice"}}}' \
   | sam local invoke QueuePositionFunction --event -
 
-# Or point at an event file
-sam local invoke InventoryLockFunction --event test-events/inventory-lock.json
 ```
 
 Available function logical IDs:
@@ -146,41 +160,28 @@ All test traffic goes through the **Simulation API** (`SimulationApiEndpoint` in
 
 ### Fire a burst
 
-**Smoke test** — low TPS to verify the pipeline end-to-end (works with default account quotas):
+**Smoke test** — low TPS to verify the pipeline end-to-end (works on the deploy defaults, no pre-warming required):
 
 ```bash
 curl -X POST https://<sim-api>/v1/simulation/start \
      -H 'Content-Type: application/json' \
      -d '{
        "run_id": "smoke-test-1",
-       "target_tps": 1000,
+       "target_tps": 50,
        "ramp_duration_seconds": 10,
        "sustain_duration_seconds": 60
      }'
 ```
 
-**Gradual ramp** — useful for observing how LMI absorbs increasing load:
+**Peak-load test** — reproduces the headline 40K TPS result. Requires pre-warming per the [Peak-load testing](#peak-load-testing) section and the API Gateway account throttle increase in Prerequisites:
 
 ```bash
 curl -X POST https://<sim-api>/v1/simulation/start \
      -H 'Content-Type: application/json' \
      -d '{
-       "run_id": "ramp-run-1",
+       "run_id": "peak-load-test-1",
        "target_tps": 40000,
        "ramp_duration_seconds": 30,
-       "sustain_duration_seconds": 120
-     }'
-```
-
-**On-sale scenario** — no ramp, immediate full burst (needs the API Gateway quota increase; see Prerequisites):
-
-```bash
-curl -X POST https://<sim-api>/v1/simulation/start \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "run_id": "onsale-run-1",
-       "target_tps": 40000,
-       "ramp_duration_seconds": 0,
        "sustain_duration_seconds": 120
      }'
 ```
@@ -188,14 +189,14 @@ curl -X POST https://<sim-api>/v1/simulation/start \
 ### View results
 
 ```bash
-curl "https://<sim-api>/v1/dashboard?run_id=onsale-run-1"
+curl "https://<sim-api>/v1/dashboard?run_id=peak-load-test-1"
 ```
 
 Example response (from the validated 40,000 TPS × 120 s headline run):
 
 ```json
 {
-  "run_id": "onsale-run-1",
+  "run_id": "peak-load-test-1",
   "total_requests": 4804200,
   "total_success": 4804164,
   "success_rate_pct": 99.999,
@@ -217,7 +218,7 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 ./scripts/scale-for-onsale.sh us-east-1 300 500
 
 # Scale back down after the window closes
-./scripts/scale-for-onsale.sh us-east-1 3 100
+./scripts/scale-for-onsale.sh us-east-1 1 3
 ```
 
 For per-handler control, call `put-function-scaling-config` directly (requires AWS CLI v2.22+):

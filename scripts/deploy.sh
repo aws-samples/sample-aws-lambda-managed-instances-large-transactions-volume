@@ -6,7 +6,8 @@
 #
 # The ticketing app's front-end is API Gateway. AWS enforces an account-
 # level rate limit on API Gateway (default 10K rps, quota code L-8A5B8E43);
-# request an increase via Service Quotas before running above ~8K TPS.
+# a 40K TPS peak-load test requires a quota increase. The default deploy
+# (Min=1, Max=3 per handler) stays well inside the API Gateway default.
 #
 # Usage:
 #   ./scripts/deploy.sh <vpc-id> <subnet-ids> [region]
@@ -14,6 +15,10 @@
 # Examples:
 #   ./scripts/deploy.sh vpc-0abc123 "subnet-0aaa111,subnet-0bbb222"
 #   ./scripts/deploy.sh vpc-0abc123 "subnet-0aaa,subnet-0bbb,subnet-0ccc" us-west-2
+#
+# Default scaling: Min=1, Max=3 execution environments per handler = three
+# warm EEs total (one c7i.4xlarge instance at idle). See README "Peak-load
+# testing" for the per-handler values used to reproduce the 40K TPS result.
 #
 # Optional environment variables:
 #   BUDGET_EMAIL=<address>   Enable the ticketing-app's AWS::Budgets::Budget
@@ -192,13 +197,16 @@ done
 # AWS::Serverless::Function silently ignores the FunctionScalingConfig
 # property, so the min/max EE values baked into template.yaml are not
 # applied by CFN. Set them explicitly here against $LATEST.PUBLISHED.
-# Values match the FunctionScalingConfig blocks in ticketing-app/template.yaml.
+#
+# Default = minimum cost. Three warm EEs total, one EC2 instance at idle.
+# For peak-load testing (e.g. 40K TPS), scale each handler to the values
+# captured in README "Peak-load testing" before firing a burst.
 echo ""
 echo "==== Applying FunctionScalingConfig (Min/Max Execution Environments) ===="
 declare -a SCALING_CONFIG=(
-  "queue-position:50:100"
-  "inventory-lock:100:500"
-  "booking-confirm:150:500"
+  "queue-position:1:3"
+  "inventory-lock:1:3"
+  "booking-confirm:1:3"
 )
 for CFG in "${SCALING_CONFIG[@]}"; do
   IFS=':' read -r FUNC MIN_EE MAX_EE <<< "$CFG"
@@ -301,24 +309,32 @@ else
   echo "  Budget alarm     : disabled (set BUDGET_EMAIL to enable; see script header)"
 fi
 echo ""
-echo "  Required Service Quotas — request increases BEFORE running load tests:"
-echo "    1. EC2 vCPU quota (L-1216C47A, 'Running On-Demand Standard instances')"
-echo "         Recommended: 7,000 vCPU (template caps LMI fleet at 6,000)"
-echo "         Default is 5-32 vCPU — insufficient for the baked-in Min EEs."
-echo "    2. API Gateway account throttle (L-8A5B8E43)"
-echo "         Recommended for 40K TPS burst: 50,000 rps (default is 10,000)."
+echo "  Service Quotas:"
+echo "    The deploy defaults (Min=1, Max=3 per handler = 12 vCPU) fit inside"
+echo "    the default account quotas. Request increases only if you plan to"
+echo "    run the headline Peak-load test (40K TPS burst):"
+echo ""
+echo "      1. EC2 vCPU quota (L-1216C47A, 'Running On-Demand Standard instances')"
+echo "           Peak-load testing needs ~1,200 vCPU (300 EEs × 4 vCPU)"
+echo "           Template caps LMI fleet at 2,000 vCPU (CapacityProviderMaxVCpus)"
+echo ""
+echo "      2. API Gateway account throttle (L-8A5B8E43)"
+echo "           Peak-load testing at 40K TPS exceeds the 10K rps default"
+echo "           Request 50,000 rps or higher before the burst"
+echo ""
+echo "    See README 'Peak-load testing' for the scaling recipe."
 echo ""
 echo "Both samconfig.toml files have been updated — run 'sam deploy' directly"
 echo "from either app directory to redeploy without passing parameters again."
 echo ""
 echo "To trigger a simulation run:"
-echo "  # Smoke test (works with default AWS quotas):"
+echo "  # Smoke test (works on the deploy defaults, no pre-warming required):"
 echo "  curl -X POST ${SIM_API_ENDPOINT}/simulation/start \\"
 echo "       -H 'Content-Type: application/json' \\"
-echo "       -d '{\"target_tps\": 1000, \"ramp_duration_seconds\": 30, \"sustain_duration_seconds\": 120}'"
+echo "       -d '{\"target_tps\": 50, \"ramp_duration_seconds\": 10, \"sustain_duration_seconds\": 60}'"
 echo ""
-echo "  # Higher-TPS run (needs API Gateway quota increase; see README):"
-echo "  #   -d '{\"target_tps\": 40000, \"ramp_duration_seconds\": 0, \"sustain_duration_seconds\": 120}'"
+echo "  # Peak-load test (needs pre-warming — see README \"Peak-load testing\" — and the API Gateway quota increase):"
+echo "  #   -d '{\"target_tps\": 40000, \"ramp_duration_seconds\": 30, \"sustain_duration_seconds\": 120}'"
 echo ""
 echo "AWS console links:"
 echo "  Lambda functions (per-function invocations / duration / errors / throttles):"
