@@ -21,7 +21,7 @@ A spike-tolerant ticketing system that stays warm through the on-sale moment and
 - **EC2 pricing model** — Savings Plans and Reserved Instances apply; ~$24,000/year with a cost-optimized `MinEE` baseline + pre-warm
 - **Same Lambda programming model** — no Dockerfile, no ECS task definitions
 - **Multi-concurrent handlers** — one execution environment serves 8 simultaneous requests when handlers are thread-safe
-- **Reproducible burst tests** — smoke, ramp, and on-sale scenarios out of the box
+- **Reproducible burst tests** — smoke and peak-load scenarios out of the box
 
 ## Architecture
 
@@ -96,6 +96,8 @@ This script:
 3. Publishes Lambda function versions and applies the per-function `MinExecutionEnvironments` / `MaxExecutionEnvironments` scaling config via `put-function-scaling-config` (SAM's `AWS::Serverless::Function` silently ignores the nested property, so the script applies it explicitly)
 4. Builds and deploys the **Simulation App**, wiring in the live Ticketing API endpoint
 5. Prints both API endpoints, the required Service Quota values, and a ready-to-run curl command
+   
+> **Note:** The Execution Environment defaults are `Min=1, Max=3` on all three handlers — cost-safe for a fresh deploy. See [Peak-load testing](#peak-load-testing) for the values used to reproduce the headline 40K TPS result.
 
 ### Option 2: Manual
 
@@ -118,6 +120,18 @@ BUDGET_EMAIL=ops@example.com \
 ```
 
 The default threshold is set by the `BudgetMonthlyUsd` template parameter; override it in `ticketing-app/samconfig.toml` or on the SAM CLI if you want a different ceiling. If `BUDGET_EMAIL` is unset the deploy proceeds without the alarm.
+
+### Peak-load testing
+
+The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, scale each handler to the per-function values below before firing a burst. Apply them via `scripts/scale-for-onsale.sh`, the AWS CLI, or the Lambda console.
+
+| Handler | Min EEs | Max EEs |
+|---|---|---|
+| `queue-position` | 50 | 100 |
+| `inventory-lock` | 100 | 500 |
+| `booking-confirm` | 150 | 500 |
+
+These are the exact values used for the headline test; LMI pre-provisions roughly 75 `c7i.4xlarge` instances at this scale. See [`docs/test-results.md`](docs/test-results.md) for the full measurement report. After the test, return the handlers to the deploy defaults (`Min=1, Max=3`) to minimise idle cost.
 
 ## Local Handler Testing
 
@@ -146,41 +160,28 @@ All test traffic goes through the **Simulation API** (`SimulationApiEndpoint` in
 
 ### Fire a burst
 
-**Smoke test** — low TPS to verify the pipeline end-to-end (works with default account quotas):
+**Smoke test** — low TPS to verify the pipeline end-to-end (works on the deploy defaults, no pre-warming required):
 
 ```bash
 curl -X POST https://<sim-api>/v1/simulation/start \
      -H 'Content-Type: application/json' \
      -d '{
        "run_id": "smoke-test-1",
-       "target_tps": 1000,
+       "target_tps": 50,
        "ramp_duration_seconds": 10,
        "sustain_duration_seconds": 60
      }'
 ```
 
-**Gradual ramp** — useful for observing how LMI absorbs increasing load:
+**Peak-load test** — reproduces the headline 40K TPS result. Requires pre-warming the handlers to the per-function values in [Peak-load testing](#peak-load-testing), and the API Gateway account throttle increase in Prerequisites:
 
 ```bash
 curl -X POST https://<sim-api>/v1/simulation/start \
      -H 'Content-Type: application/json' \
      -d '{
-       "run_id": "ramp-run-1",
+       "run_id": "peak-load-test-1",
        "target_tps": 40000,
        "ramp_duration_seconds": 30,
-       "sustain_duration_seconds": 120
-     }'
-```
-
-**On-sale scenario** — no ramp, immediate full burst (needs the API Gateway quota increase; see Prerequisites):
-
-```bash
-curl -X POST https://<sim-api>/v1/simulation/start \
-     -H 'Content-Type: application/json' \
-     -d '{
-       "run_id": "onsale-run-1",
-       "target_tps": 40000,
-       "ramp_duration_seconds": 0,
        "sustain_duration_seconds": 120
      }'
 ```
@@ -188,14 +189,14 @@ curl -X POST https://<sim-api>/v1/simulation/start \
 ### View results
 
 ```bash
-curl "https://<sim-api>/v1/dashboard?run_id=onsale-run-1"
+curl "https://<sim-api>/v1/dashboard?run_id=peak-load-test-1"
 ```
 
 Example response (from the validated 40,000 TPS × 120 s headline run):
 
 ```json
 {
-  "run_id": "onsale-run-1",
+  "run_id": "peak-load-test-1",
   "total_requests": 4804200,
   "total_success": 4804164,
   "success_rate_pct": 99.999,
@@ -217,7 +218,7 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 ./scripts/scale-for-onsale.sh us-east-1 300 500
 
 # Scale back down after the window closes
-./scripts/scale-for-onsale.sh us-east-1 3 100
+./scripts/scale-for-onsale.sh us-east-1 1 3
 ```
 
 For per-handler control, call `put-function-scaling-config` directly (requires AWS CLI v2.22+):
