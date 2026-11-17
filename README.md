@@ -215,9 +215,9 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 
 ```bash
 # Pre-warm all three handlers a few minutes before the on-sale opens
-./scripts/scale-for-onsale.sh us-east-1 300 500
+./scripts/scale-for-onsale.sh us-east-1 150 500
 
-# Scale back down after the window closes
+# Scale back down to the deploy defaults after the window closes
 ./scripts/scale-for-onsale.sh us-east-1 1 3
 ```
 
