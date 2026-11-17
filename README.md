@@ -242,9 +242,9 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 ## Cost
 
-LMI uses Amazon EC2 instance pricing plus a 15% management fee. Compute Savings Plans and Reserved Instances apply to the underlying instance cost. The LMI configuration runs a small always-on baseline (nine execution environments handling browse traffic) and uses a scaling script to pre-warm to 300 execution environments in the minutes leading up to each event, then scales back down afterward.
+LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
-Assuming the fleet is pre-warmed for a 7-minute window (5-minute ramp and 2-minute burst) then scaled back down, the estimated cost for simulating each burst is around $37.
+The template ships with cost-safe defaults (`Min=1, Max=3` per handler = 3 warm EEs = 1 c7i.4xlarge baseline). For production events, use `scripts/scale-for-onsale.sh` to pre-warm to the [Peak-load testing](#peak-load-testing) values beforehand and scale back down after. Savings Plans and Reserved Instances apply to the EC2 portion.
 
 ## Security
 
