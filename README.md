@@ -42,7 +42,6 @@ Deep dives:
   - At least 2 subnets in different AZs (3 recommended)
   - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs - LMI needs outbound HTTPS to send telemetry
 - **AWS Service Quotas** - the deploy defaults fit inside default account quotas; no increase required for a fresh deploy. Peak-load testing requires EC2 vCPU and API Gateway throttle increases.
-- **IAM Permissions** required for performing actions with SAM and LMI
 
 ## Project Structure
 
@@ -215,9 +214,9 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 
 ```bash
 # Pre-warm all three handlers a few minutes before the on-sale opens
-./scripts/scale-for-onsale.sh us-east-1 300 500
+./scripts/scale-for-onsale.sh us-east-1 150 500
 
-# Scale back down after the window closes
+# Scale back down to the deploy defaults after the window closes
 ./scripts/scale-for-onsale.sh us-east-1 1 3
 ```
 
@@ -242,9 +241,9 @@ To automate around a recurring event, wire the same call into an EventBridge Sch
 
 ## Cost
 
-LMI uses Amazon EC2 instance pricing plus a 15% management fee. Compute Savings Plans and Reserved Instances apply to the underlying instance cost. The LMI configuration runs a small always-on baseline (nine execution environments handling browse traffic) and uses a scaling script to pre-warm to 300 execution environments in the minutes leading up to each event, then scales back down afterward.
+LMI uses **EC2 instance pricing + 15 % management fee** — you pay for the underlying instances while they are running, regardless of invocation volume.
 
-Assuming the fleet is pre-warmed for a 7-minute window (5-minute ramp and 2-minute burst) then scaled back down, the estimated cost for simulating each burst is around $37.
+The template ships with cost-safe defaults (`Min=1, Max=3` per handler = 3 warm EEs = 1 c7i.4xlarge baseline). For production events, use `scripts/scale-for-onsale.sh` to pre-warm to the [Peak-load testing](#peak-load-testing) values beforehand and scale back down after. Savings Plans and Reserved Instances apply to the EC2 portion.
 
 ## Security
 
