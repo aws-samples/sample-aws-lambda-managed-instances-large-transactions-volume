@@ -42,7 +42,6 @@ Deep dives:
   - At least 2 subnets in different AZs (3 recommended)
   - NAT Gateway or VPC endpoints for DynamoDB and CloudWatch Logs - LMI needs outbound HTTPS to send telemetry
 - **AWS Service Quotas** - the deploy defaults fit inside default account quotas; no increase required for a fresh deploy. Peak-load testing requires EC2 vCPU and API Gateway throttle increases.
-- **IAM Permissions** required for performing actions with SAM and LMI
 
 ## Project Structure
 
