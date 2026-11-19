@@ -219,11 +219,13 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 The sample repository ships an optional single-page web UI (in the demo-ui/ folder) that wraps the same simulation and dashboard endpoints as the curl examples above. Point it at your simulation API endpoint, then fire bursts and view results interactively without leaving the browser. 
 
 **Configure and start the UI: **
+```bash
+# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint and run the UI
 
-# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint. 
- cd demo-ui && python3 serve.py 
- # Serving on http://localhost:8000/ 
+cd demo-ui && python3 serve.py 
 
+# Serving on http://localhost:8000/ 
+```
 **Fire a burst**. Pick a target load (a preset button or a custom TPS value), set the sustain duration and ramp, then press Start burst. The UI POSTs to /simulation/start and stores the returned run_id and event_id so you can query DynamoDB directly if you want to drill deeper. 
 
 **View results.** After the burst completes, press View results. The UI queries API Gateway metrics, DynamoDB, CloudWatch Logs Insights, and CloudWatch Lambda metrics in parallel to reconstruct the run: total requests received, durable bookings written, and a per-handler table showing EEs used, Lambda throttles, and p95 / p99 latency. 
