@@ -134,6 +134,26 @@ After the test, return to the deploy defaults to minimise idle cost:
 ./scripts/scale-for-onsale.sh us-east-1 1 3
 ```
 
+### Peak-load testing
+
+The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
+
+> **Suggested service-quota increases for the reference 40K TPS × 120 s run** (adjust for your target load and instance-size mix):
+> - **EC2 vCPU** (`L-1216C47A`, *Running On-Demand Standard instances*) — around 1,200 vCPU for this run (300 EEs × 4 vCPU on `c7i.4xlarge`). The template caps the LMI fleet at 2,000 vCPU (`CapacityProviderMaxVCpus`).
+> - **API Gateway account throttle** (`L-8A5B8E43`) — default is 10,000 rps; the 40K burst needs at least 50,000 rps.
+>
+> `./scripts/deploy.sh` reprints these at the end of every run for reference.
+
+```bash
+./scripts/scale-for-onsale.sh us-east-1 150 500
+```
+
+After the test, return to the deploy defaults to minimise idle cost:
+
+```bash
+./scripts/scale-for-onsale.sh us-east-1 1 3
+```
+
 ## Local Handler Testing
 
 For a quick sanity check without deploying, each handler can be invoked locally with the SAM CLI. This runs the function in a Docker container with the environment variables from `template.yaml` and your current AWS credentials, so AWS SDK calls go to real DynamoDB and ElastiCache. It is useful for validating handler logic, request-schema parsing, and env-var wiring before paying for a full deploy. `sam local invoke` does **not** emulate the LMI capacity provider (that path is service-side); for end-to-end runs, use `scripts/deploy.sh`.
