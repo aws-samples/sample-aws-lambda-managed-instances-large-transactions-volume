@@ -124,6 +124,12 @@ The default threshold is set by the `BudgetMonthlyUsd` template parameter; overr
 
 The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
 
+> **Suggested service-quota increases for the reference 40K TPS × 120 s run** (adjust for your target load and instance-size mix):
+> - **EC2 vCPU** - around 1,200 vCPU for this run (300 EEs × 4 vCPU on `c7i.4xlarge`). The template caps the LMI fleet at 2,000 vCPU (`CapacityProviderMaxVCpus`).
+> - **API Gateway account throttle** - default is 10,000 rps; the 40K burst needs at least 50,000 rps.
+>
+> `./scripts/deploy.sh` reprints these at the end of every run for reference.
+
 ```bash
 ./scripts/scale-for-onsale.sh us-east-1 150 500
 ```
@@ -207,6 +213,27 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
   }
 }
 ```
+
+### Interactive demo UI 
+
+The sample repository ships an optional single-page web UI (in the demo-ui/ folder) that wraps the same simulation and dashboard endpoints as the curl examples above. Point it at your simulation API endpoint, then fire bursts and view results interactively without leaving the browser. 
+
+```bash
+# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint and start the UI
+
+cd demo-ui && python3 serve.py 
+
+# Serving on http://localhost:8000/ 
+```
+**Fire a burst**. Pick a target load (a preset button or a custom TPS value), set the sustain duration and ramp, then press Start burst. The UI POSTs to /simulation/start and stores the returned run_id and event_id so you can query DynamoDB directly if you want to drill deeper. 
+
+**View results.** After the burst completes, press View results. The UI queries API Gateway metrics, DynamoDB, CloudWatch Logs Insights, and CloudWatch Lambda metrics in parallel to reconstruct the run: total requests received, durable bookings written, and a per-handler table showing EEs used, Lambda throttles, and p95 / p99 latency. 
+The identifiers panel at the top exposes the burst's run_id (partition key in the simulation metrics table) and event_id (used in both the inventory and bookings tables), giving you the option to locate them directly into DynamoDB or CloudWatch Logs Insights for the specific burst you just ran.  
+
+
+![Demo UI results panel](docs/images/ui-screenshot.png)            
+_Demo UI results panel from a 40,000 TPS × 120s run: 4,804,200 API Gateway requests and 1,750,886 durable bookings, plus a per-handler table showing the baseline EE pool (50/100/150 for queue-position / inventory-lock / booking-confirm). 36 additional EEs are pre-emptively warmed on booking-confirm during the burst, zero Lambda throttles, and p99 latencies of 4.7 / 15.8 / 39.8 ms. _
+
 
 ## Pre-warming for a Scheduled Event
 
