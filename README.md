@@ -214,6 +214,26 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 }
 ```
 
+### Interactive demo UI 
+
+The sample repository ships an optional single-page web UI (in the demo-ui/ folder) that wraps the same simulation and dashboard endpoints as the curl examples above. Point it at your simulation API endpoint, then fire bursts and view results interactively without leaving the browser. 
+
+**Configure and start the UI: **
+
+# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint. 
+ cd demo-ui && python3 serve.py 
+ # Serving on http://localhost:8000/ 
+
+**Fire a burst**. Pick a target load (a preset button or a custom TPS value), set the sustain duration and ramp, then press Start burst. The UI POSTs to /simulation/start and stores the returned run_id and event_id so you can query DynamoDB directly if you want to drill deeper. 
+
+**View results.** After the burst completes, press View results. The UI queries API Gateway metrics, DynamoDB, CloudWatch Logs Insights, and CloudWatch Lambda metrics in parallel to reconstruct the run: total requests received, durable bookings written, and a per-handler table showing EEs used, Lambda throttles, and p95 / p99 latency. 
+The identifiers panel at the top exposes the burst's run_id (partition key in the simulation metrics table) and event_id (used in both the inventory and bookings tables), giving you the option to locate them directly into DynamoDB or CloudWatch Logs Insights for the specific burst you just ran.  
+
+
+![Demo UI results panel](docs/images/ui-screenshot.png)            
+_Demo UI results panel from a 40,000 TPS × 120s run: 4,804,200 API Gateway requests and 1,750,886 durable bookings, plus a per-handler table showing the baseline EE pool (50/100/150 for queue-position / inventory-lock / booking-confirm). 36 additional EEs are pre-emptively warmed on booking-confirm during the burst, zero Lambda throttles, and p99 latencies of 4.7 / 15.8 / 39.8 ms. _
+
+
 ## Pre-warming for a Scheduled Event
 
 `scripts/scale-for-onsale.sh` applies the same `MinExecutionEnvironments` / `MaxExecutionEnvironments` values across all three ticketing handlers, useful for a one-time on-sale window:
