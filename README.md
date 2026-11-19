@@ -124,20 +124,6 @@ The default threshold is set by the `BudgetMonthlyUsd` template parameter; overr
 
 The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
 
-```bash
-./scripts/scale-for-onsale.sh us-east-1 150 500
-```
-
-After the test, return to the deploy defaults to minimise idle cost:
-
-```bash
-./scripts/scale-for-onsale.sh us-east-1 1 3
-```
-
-### Peak-load testing
-
-The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max=3` per handler) so a fresh deploy costs almost nothing while idle. To reproduce the headline **40,000 TPS × 120 s result**, pre-warm all three handlers before firing a burst:
-
 > **Suggested service-quota increases for the reference 40K TPS × 120 s run** (adjust for your target load and instance-size mix):
 > - **EC2 vCPU** (`L-1216C47A`, *Running On-Demand Standard instances*) — around 1,200 vCPU for this run (300 EEs × 4 vCPU on `c7i.4xlarge`). The template caps the LMI fleet at 2,000 vCPU (`CapacityProviderMaxVCpus`).
 > - **API Gateway account throttle** (`L-8A5B8E43`) — default is 10,000 rps; the 40K burst needs at least 50,000 rps.
