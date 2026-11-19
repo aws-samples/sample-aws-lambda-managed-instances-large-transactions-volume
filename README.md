@@ -131,14 +131,23 @@ The Execution Environment deploy defaults are intentionally minimal (`Min=1, Max
 > `./scripts/deploy.sh` reprints these at the end of every run for reference.
 
 ```bash
-./scripts/scale-for-onsale.sh us-east-1 150 500
+./scripts/scale-for-onsale.sh \
+  --region us-east-1 \
+  --queue-position 50:100 \
+  --inventory-lock 100:200 \
+  --booking-confirm 150:300
 ```
 
 After the test, return to the deploy defaults to minimise idle cost:
 
 ```bash
-./scripts/scale-for-onsale.sh us-east-1 1 3
+./scripts/scale-for-onsale.sh \
+  --region us-east-1 \
+  --queue-position 1:3 \
+  --inventory-lock 1:3 \
+  --booking-confirm 1:3
 ```
+
 
 ## Local Handler Testing
 
@@ -239,13 +248,24 @@ The identifiers panel at the top exposes the burst's run_id (partition key in th
 
 `scripts/scale-for-onsale.sh` applies the same `MinExecutionEnvironments` / `MaxExecutionEnvironments` values across all three ticketing handlers, useful for a one-time on-sale window:
 
+`scripts/scale-for-onsale.sh` takes per-handler `MinExecutionEnvironments:MaxExecutionEnvironments` flags, so the three ticketing handlers can be sized independently (queue-position needs less headroom than booking-confirm). Useful for a one-time on-sale window:
+
 ```bash
 # Pre-warm all three handlers a few minutes before the on-sale opens
-./scripts/scale-for-onsale.sh us-east-1 150 500
+./scripts/scale-for-onsale.sh \
+  --region us-east-1 \
+  --queue-position 50:100 \
+  --inventory-lock 100:200 \
+  --booking-confirm 150:300
 
 # Scale back down to the deploy defaults after the window closes
-./scripts/scale-for-onsale.sh us-east-1 1 3
+./scripts/scale-for-onsale.sh \
+  --region us-east-1 \
+  --queue-position 1:3 \
+  --inventory-lock 1:3 \
+  --booking-confirm 1:3
 ```
+
 
 For per-handler control, call `put-function-scaling-config` directly (requires AWS CLI v2.22+):
 
