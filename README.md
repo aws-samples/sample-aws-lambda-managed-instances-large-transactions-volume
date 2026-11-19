@@ -218,9 +218,8 @@ Example response (from the validated 40,000 TPS × 120 s headline run):
 
 The sample repository ships an optional single-page web UI (in the demo-ui/ folder) that wraps the same simulation and dashboard endpoints as the curl examples above. Point it at your simulation API endpoint, then fire bursts and view results interactively without leaving the browser. 
 
-**Configure and start the UI: **
 ```bash
-# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint and run the UI
+# In demo-ui/config.js, set SIMULATION_API_URL to your simulation endpoint and start the UI
 
 cd demo-ui && python3 serve.py 
 
