@@ -232,7 +232,7 @@ The identifiers panel at the top exposes the burst's run_id (partition key in th
 
 
 ![Demo UI results panel](docs/images/ui-screenshot.png)            
-*Demo UI results panel from a 40,000 TPS × 120s run: 4,804,200 API Gateway requests and 1,750,886 durable bookings, plus a per-handler table showing the baseline EE pool (50/100/150 for queue-position / inventory-lock / booking-confirm). 36 additional EEs are pre-emptively warmed on booking-confirm during the burst, zero Lambda throttles, and p99 latencies of 4.7 / 15.8 / 39.8 ms. *
+*Demo UI results panel from a 40,000 TPS × 120s run: 4,804,200 API Gateway requests and 1,750,886 durable bookings, plus a per-handler table showing the baseline EE pool (50/100/150 for queue-position / inventory-lock / booking-confirm). 36 additional EEs are pre-emptively warmed on booking-confirm during the burst, zero Lambda throttles, and p99 latencies of 4.7 / 15.8 / 39.8 ms.*
 
 
 ## Pre-warming for a Scheduled Event
