@@ -26,9 +26,9 @@
 #   # Pre-warm for the reference 40K TPS × 120 s run (300 EEs total)
 #   ./scripts/scale-for-onsale.sh \
 #     --region us-east-1 \
-#     --queue-position 50:200 \
-#     --inventory-lock 100:400 \
-#     --booking-confirm 150:600
+#     --queue-position 50:100 \
+#     --inventory-lock 100:200 \
+#     --booking-confirm 150:300
 #
 #   # Scale back down to the deploy defaults after the window closes
 #   ./scripts/scale-for-onsale.sh \
